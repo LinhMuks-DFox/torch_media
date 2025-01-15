@@ -1,10 +1,10 @@
+#include "torchmedia/basic.hpp"
 #include <fmt/core.h>
 #include <torch/torch.h>
-#include <torchmedia/audio.hpp>
-#include <torchmedia/basic.hpp>
+#include <torchmedia.hpp>
 int main() {
-  fmt::print("hello torch!");
-  auto t = torch::tensor({1, 2, 3});
-  fmt::print("{}", torchmedia::basic::to_string(t));
+  auto audio = torchmedia::audio::io::load_audio("dummy_audio_440Hz.wav").data;
+  audio = torchmedia::basic::to_device(audio, "mps");
+  torchmedia::basic::print_tensor(audio);
   return 0;
 }

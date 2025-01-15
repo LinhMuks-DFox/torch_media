@@ -52,78 +52,104 @@ inline auto _apply_convolve_mode(torch::Tensor conv_result, int64_t x_length,
   }
 }
 
-inline auto convolve(tensor_t x, tensor_t y, convolve_mode mode) -> tensor_t {
-  /*
-      x (tensor_t): First convolution operand, with shape `(..., N)`.
-      y (tensor_t): Second convolution operand, with shape `(..., M)`
-          (leading dimensions must be broadcast-able with those of ``x``).
-      mode (str, optional): Must be one of ("full", "valid", "same").
+inline auto convolve(torch::Tensor x, torch::Tensor y, convolve_mode mode)
+    -> torch::Tensor {
+  using namespace torch::indexing;
 
-          * "full": Returns the full convolution result, with shape `(..., N + M
-     - 1)`. (Default)
-          * "valid": Returns the segment of the full convolution result
-     corresponding to where the two inputs overlap completely, with shape `(...,
-     max(N, M) - min(N, M) + 1)`.
-          * "same": Returns the center segment of the full convolution result,
-     with shape `(..., N)`.
-  */
-  if (!_check_shape_compatible(x, y)) {
-    throw std::invalid_argument("Shapes are not compatible for convolution.");
+  if (x.dim() == 0 || y.dim() == 0) {
+    throw std::invalid_argument("convolve: x or y is zero-dimensional.");
   }
-
-  auto x_size = x.size(-1);
-  auto y_size = y.size(-1);
+  auto ndims_x = x.dim();
+  auto ndims_y = y.dim();
+  if (ndims_x < ndims_y) {
+    for (int i = 0; i < (ndims_y - ndims_x); i++) {
+      x = x.unsqueeze(0);
+    }
+    ndims_x = ndims_y;
+  } else if (ndims_y < ndims_x) {
+    for (int i = 0; i < (ndims_x - ndims_y); i++) {
+      y = y.unsqueeze(0);
+    }
+    ndims_y = ndims_x;
+  }
   if (x.size(-1) < y.size(-1)) {
     std::swap(x, y);
   }
+  auto x_size = x.size(-1);
+  auto y_size = y.size(-1);
+  auto leading_dims_count = ndims_x - 1;
+  auto shape_x = x.sizes();
+  auto shape_y = y.sizes();
+  std::vector<int64_t> new_shape(leading_dims_count);
 
-  if (x.sizes().slice(0, -1) != y.sizes().slice(0, -1)) {
-    auto new_shape = x.sizes().slice(0, -1).vec();
-    for (size_t i = 0; i < new_shape.size(); i++) {
-      new_shape[i] = std::max(x.size(i), y.size(i));
-    }
-    new_shape.push_back(x.size(-1));
-    x = x.broadcast_to(new_shape);
-    new_shape.pop_back();
-    new_shape.push_back(y.size(-1));
-    y = y.broadcast_to(new_shape);
+  for (int i = 0; i < leading_dims_count; i++) {
+    new_shape[i] = std::max(shape_x[i], shape_y[i]);
   }
-  auto num_signals =
-      torch::tensor(x.sizes().slice(0, -1)).prod().item<int64_t>();
-  auto reshaped_x = x.reshape({num_signals, x.size(-1)});
-  auto reshaped_y = y.reshape({num_signals, y.size(-1)});
-  auto output = torch::nn::functional::conv1d(
-      reshaped_x, reshaped_y.flip(-1).unsqueeze(1),
-      torch::nn::functional::Conv1dFuncOptions()
-          .stride(1)
-          .groups(reshaped_x.size(0))
-          .padding(reshaped_y.size(-1) - 1));
-  auto output_shape = x.sizes().slice(0, -1).vec();
-  output_shape.push_back(-1);
-  auto result = output.reshape(output_shape);
+  auto broadcast_shape_x = new_shape;
+  broadcast_shape_x.push_back(x_size);
+  x = x.broadcast_to(broadcast_shape_x);
+  auto broadcast_shape_y = new_shape;
+  broadcast_shape_y.push_back(y_size);
+  y = y.broadcast_to(broadcast_shape_y);
+  auto num_signals = 1LL;
+  for (int i = 0; i < leading_dims_count; i++) {
+    num_signals *= new_shape[i];
+  }
+  auto reshaped_x = x.reshape({num_signals, 1, x_size});
+  auto reshaped_y = y.flip(-1).reshape({num_signals, 1, y_size});
+  auto conv_out =
+      torch::nn::functional::conv1d(reshaped_x, reshaped_y,
+                                    torch::nn::functional::Conv1dFuncOptions()
+                                        .stride(1)
+                                        .groups(num_signals)
+                                        .padding(y_size - 1));
+  auto output_length = conv_out.size(-1);
+  auto output_shape = new_shape;
+  output_shape.push_back(output_length);
+  auto result = conv_out.reshape(output_shape);
   return _apply_convolve_mode(result, x_size, y_size, mode);
 }
 
-inline auto amplitude_to_DB(tensor_t signal, float amin, float db_multiplier,
-                            float topdb, bool apply_topdb) -> tensor_t {
-  // Ensure amin is greater than 0 to avoid log of zero
-  amin = std::max(amin, std::numeric_limits<float>::min());
+// 1) 定义参数选项结构
+struct amplitude_to_db_option {
+  float amin = 1e-10f;
+  float top_db = 80.0f;
+  float db_multiplier = 1.0f;
+  bool apply_top_db = true;
 
-  // Convert amplitude to power
-  tensor_t power = torch::pow(signal, 2.0);
-
-  // Apply logarithm
-  tensor_t db = 10.0 * torch::log10(torch::clamp(
-                           power, amin, std::numeric_limits<float>::max()));
-
-  // Apply multiplier
-  db = db * db_multiplier;
-
-  // Apply top_db limit if needed
-  if (apply_topdb) {
-    float max_db = db.max().item<float>();
-    db = torch::max(db, torch::tensor(max_db - topdb));
+  auto set_amin(float a) -> amplitude_to_db_option & {
+    amin = a;
+    return *this;
   }
+  auto set_top_db(float t) -> amplitude_to_db_option & {
+    top_db = t;
+    return *this;
+  }
+  auto set_db_multiplier(float m) -> amplitude_to_db_option & {
+    db_multiplier = m;
+    return *this;
+  }
+  auto set_apply_top_db(bool b) -> amplitude_to_db_option & {
+    apply_top_db = b;
+    return *this;
+  }
+};
+
+inline auto amplitude_to_DB(tensor_t signal, amplitude_to_db_option option = {})
+    -> tensor_t {
+  if (signal.is_complex()) {
+    signal = signal.abs(); // 等价于 sqrt(real^2 + imag^2)
+  }
+  float amin_val = std::max(option.amin, std::numeric_limits<float>::min());
+  auto power = torch::pow(signal, 2.0);
+  auto db = 10.0 * torch::log10(torch::clamp(
+                       power, amin_val, std::numeric_limits<float>::max()));
+  db = db * option.db_multiplier;
+  if (option.apply_top_db) {
+    float max_db = db.max().item<float>();
+    db = torch::max(db, torch::tensor(max_db - option.top_db, db.options()));
+  }
+
   return db;
 }
 
@@ -139,7 +165,7 @@ struct spectrogram_option {
   bool _center = true;
   std::string _pad_mode = "reflect";
   bool _onesided = true;
-  bool _return_complex = false; // when true, power becomes optional;
+  bool _return_complex = true; // when true, power becomes optional;
 
   auto pad(int p) -> spectrogram_option & {
     _pad = p;
@@ -215,13 +241,15 @@ inline auto spectrogram(tensor_t signal, spectrogram_option option)
   tensor_t window =
       option._window.defined()
           ? option._window
-          : torch::hann_window(win_length,
-                               torch::TensorOptions().dtype(signal.dtype()));
-
-  auto spec_f =
-      torch::stft(signal, n_fft, hop_length, win_length, window, option._center,
-                  option._pad_mode, option._onesided, option._return_complex);
-
+          : torch::hann_window(win_length, torch::TensorOptions()
+                                               .dtype(signal.dtype())
+                                               .device(signal.device()));
+  auto spec_f = torch::stft(signal, n_fft, hop_length, win_length, window,
+                            option._center, option._pad_mode,
+                            option._normalized,    // 第八个参数
+                            option._onesided,      // 第九个参数
+                            option._return_complex // 第十个参数
+  );
   if (option._return_complex) {
     return spec_f;
   } else {
