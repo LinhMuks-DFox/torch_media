@@ -16,6 +16,8 @@ void test_spectrogram() {
   auto spe = spectrogram(audio, spectrogram_option());
   auto db = amplitude_to_DB(spe);
   torchmedia::basic::print_tensor(db);
+
+  torch::save(db.detach().cpu(), "db.pt");
 }
 
 void test_melspectrogram() {
@@ -75,6 +77,6 @@ void test_convolve() {
   torchmedia::basic::print_tensor(convolved);
 }
 int main() {
-  test_melspectrogram();
+  test_spectrogram();
   return 0;
 }
