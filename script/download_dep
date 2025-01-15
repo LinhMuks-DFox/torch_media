@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+
+import os
+import platform
+import subprocess
+
+# 配置依赖信息
+DEPENDENCIES = {
+    "fmt": {
+        "repo": "https://github.com/fmtlib/fmt.git",
+        "branch": "master"
+    },
+    "libtorch": {
+        "url": {
+            "linux": "",
+            "macos": "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.5.1.zip",
+            "windows": ""
+        }
+    },
+    # "libtorch_gpu": {
+    #     "url": {
+    #         "linux": "",
+    #         "macos": "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.5.1.zip",
+    #         "windows": ""
+    #     }
+    # },
+}
+
+DEPENDENCE_DIR = os.path.join(os.getcwd(), "dependence")
+
+
+def download_dependency(name, config):
+    print(f"Downloading {name}...")
+    os.makedirs(DEPENDENCE_DIR, exist_ok=True)
+
+    if "repo" in config:
+        dest_dir = os.path.join(DEPENDENCE_DIR, name)
+        if not os.path.exists(dest_dir):
+            subprocess.run(["git", "clone", config["repo"], dest_dir])
+        subprocess.run(["git", "-C", dest_dir, "checkout", config.get("branch", "master")])
+    elif "url" in config:
+        url = config["url"].get(platform.system().lower())
+        if url:
+            zip_path = os.path.join(DEPENDENCE_DIR, f"{name}.zip")
+            subprocess.run(["curl", "-L", "-o", zip_path, url])
+            subprocess.run(["unzip", "-o", zip_path, "-d", DEPENDENCE_DIR])
+            os.remove(zip_path)
+    print(f"{name} downloaded.")
+
+
+if __name__ == "__main__":
+    for dep, config in DEPENDENCIES.items():
+        download_dependency(dep, config)

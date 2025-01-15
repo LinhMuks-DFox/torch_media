@@ -1,0 +1,9 @@
+dependence/
+.vscode/
+.xmake/
+cmake*
+*.wav
+*.mp3
+*.mypy_cache
+__pycache__/
+build/
