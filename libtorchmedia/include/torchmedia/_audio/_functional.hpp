@@ -264,5 +264,170 @@ inline auto spectrogram(tensor_t signal, spectrogram_option option)
     return spec;
   }
 }
+
+struct melspectrogram_option {
+  int sample_rate = 16000;
+  int n_fft = 400;
+  int win_length = 400;
+  int hop_length = 200;
+  int pad = 0;
+
+  double f_min = 0.0;
+  double f_max = 0.0; // 若设为 0，后续可默认为 sample_rate/2
+  int n_mels = 128;
+
+  double power = 2.0;
+  bool normalized = false;
+  bool center = true;
+  std::string pad_mode = "reflect";
+  bool onesided = true;
+  std::string norm = "";         // "slaney" 或空字符串等
+  std::string mel_scale = "htk"; // "htk" 或 "slaney"
+};
+
+inline auto mel_filter_bank(int n_mels, double f_min, double f_max,
+                            int sample_rate,
+                            int n_stft_bins,             // 通常 = n_fft/2 + 1
+                            const std::string &norm,     // "slaney" 或 ""
+                            const std::string &mel_scale // "htk" / "slaney"
+                            ) -> torch::Tensor {
+  using namespace torch::indexing;
+  // 如果外部没指定 f_max 或给了 <=0，则默认设为 Nyquist 频率
+  if (f_max <= 0.0) {
+    f_max = sample_rate / 2.0;
+  }
+
+  // 一些辅助函数：赫兹转 mel，mel 转赫兹
+  auto hz_to_mel = [&](double freq) {
+    if (mel_scale == "slaney") {
+      // Slaney 风格公式 (approx)
+      return 2595.0 * std::log10(1.0 + freq / 700.0);
+    } else {
+      // HTK 风格
+      return 2595.0 * std::log10(1.0 + freq / 700.0);
+    }
+  };
+  auto mel_to_hz = [&](double mel) {
+    if (mel_scale == "slaney") {
+      return 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+    } else {
+      return 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+    }
+  };
+
+  double mel_min = hz_to_mel(f_min);
+  double mel_max = hz_to_mel(f_max);
+
+  // 在 mel 坐标上等距取 n_mels+2 个点
+  auto mels = torch::linspace(mel_min, mel_max, n_mels + 2);
+
+  // 逐个转换回赫兹频率
+  auto hz_points = mels.clone();
+  for (int i = 0; i < hz_points.size(0); i++) {
+    double mel_val = hz_points[i].item<double>();
+    hz_points[i] = mel_to_hz(mel_val);
+  }
+
+  // 计算每个 STFT bin 对应的赫兹频率
+  // freq_bin[i] = i * (sample_rate / 2) / (n_stft_bins - 1)
+  auto bin_frequencies = torch::linspace(0, sample_rate / 2.0, n_stft_bins);
+
+  // 创建 [n_mels, n_stft_bins] 的滤波器
+  auto fb = torch::zeros({n_mels, n_stft_bins}, torch::kFloat);
+
+  for (int m = 1; m <= n_mels; m++) {
+    double left = hz_points[m - 1].item<double>();
+    double center = hz_points[m].item<double>();
+    double right = hz_points[m + 1].item<double>();
+
+    for (int f = 0; f < n_stft_bins; f++) {
+      double freq = bin_frequencies[f].item<double>();
+      if (freq >= left && freq <= center) {
+        fb[m - 1][f] = float((freq - left) / (center - left));
+      } else if (freq > center && freq <= right) {
+        fb[m - 1][f] = float((right - freq) / (right - center));
+      } else {
+        fb[m - 1][f] = 0.0f;
+      }
+    }
+  }
+
+  // 如果 norm == "slaney"，需要对每个 mel 过滤器再做归一化 (按带宽)
+  if (norm == "slaney") {
+    for (int m = 0; m < n_mels; m++) {
+      auto row = fb.index({m, Slice()});
+      float enorm =
+          2.0f / (hz_points[m + 2].item<float>() - hz_points[m].item<float>());
+      row.mul_(enorm);
+    }
+  }
+
+  return fb;
+}
+
+inline auto mel_scale(torch::Tensor spec, torch::Tensor fb) -> torch::Tensor {
+  auto sizes = spec.sizes();
+  int64_t ndim = sizes.size();
+  int64_t freq = sizes[ndim - 2];
+  int64_t time = sizes[ndim - 1];
+
+  int64_t batch = 1;
+  for (int i = 0; i < ndim - 2; i++) {
+    batch *= sizes[i];
+  }
+  // reshape => [batch, freq, time]
+  auto spec_3d = spec.reshape({batch, freq, time});
+  // 转置 => [batch, time, freq]
+  spec_3d = spec_3d.transpose(1, 2);
+
+  // fb => [n_mels, freq], 做 transpose => [freq, n_mels]
+  auto fb_t = fb.transpose(0, 1); // [freq, n_mels]
+
+  // [batch, time, freq] matmul [freq, n_mels] => [batch, time, n_mels]
+  auto mel_3d = torch::matmul(spec_3d, fb_t);
+
+  // 再转置回 => [batch, n_mels, time]
+  mel_3d = mel_3d.transpose(1, 2);
+
+  // 最后 reshape => [..., n_mels, time]
+  std::vector<int64_t> final_shape;
+  final_shape.push_back(batch);
+  final_shape.push_back(mel_3d.size(1)); // n_mels
+  final_shape.push_back(mel_3d.size(2)); // time
+  auto mel_out = mel_3d.reshape(final_shape);
+
+  return mel_out;
+}
+inline auto melspectrogram(torch::Tensor waveform, melspectrogram_option opt)
+    -> torch::Tensor {
+  // 1) 构建 spectrogram_option
+  spectrogram_option sp_opt;
+  sp_opt._pad = opt.pad;
+  sp_opt._n_fft = opt.n_fft;
+  sp_opt._win_length = opt.win_length;
+  sp_opt._hop_length = opt.hop_length;
+  sp_opt._center = opt.center;
+  sp_opt._pad_mode = opt.pad_mode;
+  sp_opt._onesided = opt.onesided;
+  sp_opt._power = opt.power; // 1 => 幅度谱, 2 => 功率谱
+  sp_opt._normalized = opt.normalized;
+  sp_opt._return_complex = false; // 我们要实数谱，后面才能和 fb 做乘法
+
+  // 2) 调用已有 spectrogram 函数，得到实数的 [batch, freq, time] 等形状
+  auto spec = spectrogram(waveform, sp_opt);
+
+  // 3) 构建 mel filter bank
+  int n_stft_bins = opt.n_fft / 2 + 1;
+  auto fb = mel_filter_bank(opt.n_mels, opt.f_min, opt.f_max, opt.sample_rate,
+                            n_stft_bins, opt.norm,
+                            opt.mel_scale); // [n_mels, n_stft_bins]
+
+  // 4) 做 mel-scale
+  auto mel_specgram = mel_scale(spec, fb);
+  // mel_specgram => [..., n_mels, time]
+
+  return mel_specgram;
+}
+
 } // namespace torchmedia::audio::functional
 #endif // _LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_HPP
