@@ -1,4 +1,3 @@
--- 定义 torch_media 库
 target("torch_media")
     set_kind("headeronly")
     add_headerfiles("include/(**.hpp)")
