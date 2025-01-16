@@ -11,3 +11,4 @@ build/
 *.jpg
 *.pt
 *.pdf
+compile_commands.json
