@@ -13,3 +13,4 @@ build/
 *.pdf
 compile_commands.json
 CMakelists.txt
+.idea/
