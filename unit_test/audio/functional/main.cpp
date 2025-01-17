@@ -10,7 +10,7 @@ void test_spectrogram() {
     using torchmedia::audio::functional::spectrogram_option;
     auto spe = spectrogram(audio, spectrogram_option());
     auto db = amplitude_to_DB(spe);
-    torchmedia::basic::print_tensor(db);
+    torchmedia::util::print_tensor(db);
 
     torch::save(db.detach().cpu(), "db.pt");
 }
@@ -23,11 +23,11 @@ void test_melspectrogram() {
     // 2. 引入相关命名空间 (模拟你在 test_spectrogram 里做的方式)
     using torchmedia::audio::functional::amplitude_to_DB;
     using torchmedia::audio::functional::melspectrogram;
-    using torchmedia::audio::functional::melspectrogram_option;
-    using torchmedia::basic::print_tensor;
+    using torchmedia::audio::functional::mel_spectrogram_option;
+    using torchmedia::util::print_tensor;
 
     // 3. 创建 MelSpectrogram 配置
-    melspectrogram_option mel_opt;
+    mel_spectrogram_option mel_opt;
     mel_opt.sample_rate = 16000; // 或按实际采样率改
     mel_opt.n_fft = 512;
     mel_opt.win_length = 512;
@@ -46,7 +46,7 @@ void test_melspectrogram() {
 
     // 6. 打印结果形状或局部数值
     fmt::print("MelSpectrogram shape: {}\n",
-               torchmedia::basic::to_string(mel_db.sizes()));
+               torchmedia::util::to_string(mel_db.sizes()));
     print_tensor(mel_db); // 如只想看简单概览，可改成 print_tensor_info()
 }
 
@@ -57,7 +57,7 @@ void test_convolve() {
     audio = audio.to(torch::TensorOptions{}.device("mps"));
     using torchmedia::audio::functional::convolve;
     using torchmedia::audio::functional::convolve_mode;
-    using torchmedia::basic::to_string;
+    using torchmedia::util::to_string;
 
     const auto kernel =
             torch::tensor({0, 1, 0, 1},
@@ -69,7 +69,7 @@ void test_convolve() {
                to_string(kernel.sizes()));
 
     auto convolved = convolve(audio, kernel, convolve_mode::full);
-    torchmedia::basic::print_tensor(convolved);
+    torchmedia::util::print_tensor(convolved);
 }
 
 int main() {

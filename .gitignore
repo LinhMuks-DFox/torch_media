@@ -12,3 +12,4 @@ build/
 *.pt
 *.pdf
 compile_commands.json
+CMakelists.txt
