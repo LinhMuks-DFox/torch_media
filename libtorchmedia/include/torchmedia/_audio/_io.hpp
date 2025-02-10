@@ -1,4 +1,6 @@
 #pragma once
+#include <filesystem>
+#include <stdexcept>
 #ifndef LIB_TORCH_MEDIA_AUDIO_IO_HPP
 #define LIB_TORCH_MEDIA_AUDIO_IO_HPP
 #include <sox.h>
@@ -12,37 +14,22 @@ namespace torchmedia::audio::io {
 #ifdef SOX_H
     auto inline sox_backend_load_audio(const std::string &path) -> load_audio_t {
 
-        if (!LIB_TORCHMEDIA_CHECK_FILE_EXISTS(path)) {
-#ifndef LIBTORCH_NO_EXCEPTIONS
-            throw std::runtime_error("Could not load audio file " + path);
-#else
-            return load_audio_t{};
-#endif
+        if (std::filesystem::exists(path)) {
+            handle_exceptions<load_audio_t, std::runtime_error>(std::string("File dose not exist: ") + path);
         }
-        // Initialize SoX library
         if (sox_init() != SOX_SUCCESS) {
-#ifndef LIBTORCH_NO_EXCEPTIONS
-            throw std::runtime_error("Could not load audio file " + path);
-#else
-            return load_audio_t{};
-#endif
+            handle_exceptions<load_audio_t, std::runtime_error>(std::string("Fail to init sox: ") + path);
         }
 
         sox_format_t *format = sox_open_read(path.c_str(), nullptr, nullptr, nullptr);
         if (!format) {
             sox_quit();
-#ifndef LIBTORCH_NO_EXCEPTIONS
-            throw std::runtime_error("Could not load audio file " + path);
-#else
-            return load_audio_t{};
-#endif
+            handle_exceptions<load_audio_t, std::runtime_error>(std::string("Can not open file: ") + path);
         }
 
         const int sample_rate = format->signal.rate;
         const size_t num_samples = format->signal.length;
         const int num_channels = format->signal.channels;
-
-        // Calculate the total number of samples to read
         const size_t total_samples = num_samples * num_channels;
 
         std::vector<sox_sample_t> samples(total_samples);
@@ -50,35 +37,18 @@ namespace torchmedia::audio::io {
         if (samples_read != total_samples) {
             sox_close(format);
             sox_quit();
-#ifndef LIBTORCH_NO_EXCEPTIONS
-            throw std::runtime_error("Could not load audio file " + path);
-#else
-            return load_audio_t{};
-#endif
+            handle_exceptions<load_audio_t, std::runtime_error>(std::string("Could not load audio file ") + path);
         }
 
         sox_close(format);
         sox_quit();
-
-        // Convert samples to float
-        // Create a torch tensor from the samples
         const auto options = tensor_options_t().dtype(torch::kInt32);
-        tensor_t tensor =
-                torch::from_blob(samples.data(), {static_cast<int64_t>(samples_read)},
-                                 options)
-                .clone();
-
-        // Convert tensor to float and normalize
+        tensor_t tensor = torch::from_blob(samples.data(), {static_cast<int64_t>(samples_read)}, options).clone();
         tensor = tensor.to(torch::kFloat32) / static_cast<float>(SOX_SAMPLE_MAX);
-
-        // Reshape the tensor to [num_channels, num_samples_per_channel] if necessary
         if (num_channels > 1) {
-            tensor = tensor
-                    .view({
-                        static_cast<int64_t>(num_channels),
-                        static_cast<int64_t>(samples_read / num_channels)
-                    })
-                    .contiguous();
+            tensor =
+                    tensor.view({static_cast<int64_t>(num_channels), static_cast<int64_t>(samples_read / num_channels)})
+                            .contiguous();
         }
 
         return {tensor.contiguous(), sample_rate};
@@ -88,18 +58,13 @@ namespace torchmedia::audio::io {
                                        const int sample_depth) -> bool {
         // Initialize SoX library
         if (sox_init() != SOX_SUCCESS) {
-#ifndef LIBTORCH_NO_EXCEPTIONS
-            throw std::runtime_error("Could not load audio file " + path);
-#else
             return false;
-#endif
         }
 
         // Set up SoX format parameters
         sox_signalinfo_t signal;
         signal.rate = sample_rate;
-        signal.channels = audio_tensor.size(
-            0); // Assuming audio_tensor is of shape [num_channels, num_samples]
+        signal.channels = audio_tensor.size(0); // Assuming audio_tensor is of shape [num_channels, num_samples]
         signal.precision = sample_depth;
         signal.length = 0;
         signal.mult = nullptr;
@@ -114,8 +79,7 @@ namespace torchmedia::audio::io {
         encoding.opposite_endian = sox_false;
 
         // Open the output file
-        sox_format_t *format = sox_open_write(path.c_str(), &signal, &encoding,
-                                              nullptr, nullptr, nullptr);
+        sox_format_t *format = sox_open_write(path.c_str(), &signal, &encoding, nullptr, nullptr, nullptr);
         if (!format) {
             sox_quit();
             return false;
@@ -125,8 +89,7 @@ namespace torchmedia::audio::io {
         const auto float_tensor = audio_tensor * static_cast<float>(SOX_SAMPLE_MAX);
         const auto int_tensor = float_tensor.to(torch::kInt32);
         std::vector<sox_sample_t> samples(int_tensor.numel());
-        std::memcpy(samples.data(), int_tensor.data_ptr<int32_t>(),
-                    samples.size() * sizeof(int32_t));
+        std::memcpy(samples.data(), int_tensor.data_ptr<int32_t>(), samples.size() * sizeof(int32_t));
 
         // Write samples to the output file
         size_t samples_written = sox_write(format, samples.data(), samples.size());
@@ -146,24 +109,20 @@ namespace torchmedia::audio::io {
 #define SAVE_AUDIO_BACK_END sox_backend_save_audio
 #endif
 
-#ifndef  LOAD_AUDIO_BACK_END
+#ifndef LOAD_AUDIO_BACK_END
 #error "No backend detected, libtorchmedia requires sox"
 #endif
-    auto inline load_audio(const std::string &path) -> load_audio_t {
-        return LOAD_AUDIO_BACK_END(path);
-    }
+    auto inline load_audio(const std::string &path) -> load_audio_t { return LOAD_AUDIO_BACK_END(path); }
 
-    auto inline load_audio(std::filesystem::path &path) -> load_audio_t {
-        return LOAD_AUDIO_BACK_END(path.string());
-    }
+    auto inline load_audio(std::filesystem::path &path) -> load_audio_t { return LOAD_AUDIO_BACK_END(path.string()); }
 
-    auto inline save_audio(tensor_t audio_tensor, const std::string &path,
-                           const int sample_rate, const int sample_depth) -> bool {
+    auto inline save_audio(tensor_t audio_tensor, const std::string &path, const int sample_rate,
+                           const int sample_depth) -> bool {
         return SAVE_AUDIO_BACK_END(audio_tensor, path, sample_rate, sample_depth);
     }
 
-    auto inline save_audio(tensor_t audio_tensor, const std::filesystem::path &path,
-                           const int sample_rate, const int sample_depth) -> bool {
+    auto inline save_audio(tensor_t audio_tensor, const std::filesystem::path &path, const int sample_rate,
+                           const int sample_depth) -> bool {
         return SAVE_AUDIO_BACK_END(audio_tensor, path.string(), sample_rate, sample_depth);
     }
 } // namespace torchmedia::audio::io

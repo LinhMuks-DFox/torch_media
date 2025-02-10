@@ -1,17 +1,16 @@
 #pragma once
-#include "ATen/core/TensorBody.h"
-#include "c10/util/ArrayRef.h"
-#include "fmt/core.h"
 #include <ostream>
+#include <ranges>
 #include <sstream>
 #include <string>
 #include <torch/torch.h>
+#include "fmt/core.h"
+#include "torchmedia/globel_include.hpp"
 #ifndef LIBTORCH_MEDIA_BASIC
 #define LIBTORCH_MEDIA_BASIC
 
 namespace torchmedia::util {
-    auto inline to_device(tensor_t tensor, const std::string &device)
-        -> tensor_t {
+    auto inline to_device(tensor_t tensor, const std::string &device) -> tensor_t {
         return tensor.to(tensor_options_t().device(device));
     };
 
@@ -34,8 +33,8 @@ namespace torchmedia::util {
         return ss.str();
     }
 
-    auto inline print_tensor(const tensor_t &t) -> void {
-        fmt::print("{}", to_string(t));
-    }
-} // namespace torchmedia::basic
+    auto inline print_tensor(const tensor_t &t) -> void { fmt::print("{}", to_string(t)); }
+
+    auto inline tensor_wise_equals(const tensor_t &left, const tensor_t &right) { return torch::all(left == right) }
+} // namespace torchmedia::util
 #endif

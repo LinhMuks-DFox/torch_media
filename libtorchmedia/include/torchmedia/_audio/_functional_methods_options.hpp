@@ -128,5 +128,8 @@ namespace torchmedia::audio::functional {
         std::string norm; // "slaney" 或空字符串等
         std::string mel_scale = "htk"; // "htk" 或 "slaney"
     } mel_spectrogram_option_t;
-}
-#endif //LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_METHODS_OPTIONS_HPP
+
+    typedef struct db_to_amplitude_option {
+    } db_to_amplitude_option_t;
+} // namespace torchmedia::audio::functional
+#endif // LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_METHODS_OPTIONS_HPP

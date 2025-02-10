@@ -1,11 +1,13 @@
 #pragma once
+#include <stdexcept>
+#include "torch/csrc/autograd/generated/variable_factories.h"
 #ifndef LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_HPP
 #define LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_HPP
 #include <ATen/core/TensorBody.h>
-#include "../globel_include.hpp"
-#include "_functional_methods_options.hpp"
 #include <torch/nn/functional/conv.h>
 #include <torch/nn/options/conv.h>
+#include "../globel_include.hpp"
+#include "_functional_methods_options.hpp"
 
 namespace torchmedia::audio::functional {
     enum convolve_mode { full, valid, same };
@@ -23,15 +25,13 @@ namespace torchmedia::audio::functional {
         return true;
     }
 
-    inline auto _apply_convolve_mode(tensor_t conv_result, const int64_t x_length,
-                                     const int64_t y_length, const convolve_mode mode)
-        -> tensor_t {
+    inline auto _apply_convolve_mode(tensor_t conv_result, const int64_t x_length, const int64_t y_length,
+                                     const convolve_mode mode) -> tensor_t {
         switch (mode) {
             case full:
                 return conv_result;
             case valid: {
-                const auto target_length =
-                        std::max(x_length, y_length) - std::min(x_length, y_length) + 1;
+                const auto target_length = std::max(x_length, y_length) - std::min(x_length, y_length) + 1;
                 auto start_idx = (conv_result.size(-1) - target_length) / 2;
                 return conv_result.slice(-1, start_idx, start_idx + target_length);
             }
@@ -40,26 +40,17 @@ namespace torchmedia::audio::functional {
                 return conv_result.slice(-1, start_idx, start_idx + x_length);
             }
             default:
-#ifdef LIBTORCH_NO_EXCEPTIONS
-                return torch::empty({1});
-#else
-                throw std::invalid_argument(
-                    "Unrecognized mode value. Please specify one of full, valid, same.");
-#endif
+                handle_exceptions<class torch::Tensor, std::invalid_argument>(
+                        torch::empty({1}), " Unrecognized mode value.Please specify one of full, valid, same.");
         }
     }
 
-    inline auto convolve(tensor_t x, tensor_t y, const convolve_mode mode)
-        -> tensor_t {
+    inline auto convolve(tensor_t x, tensor_t y, const convolve_mode mode) -> tensor_t {
         using namespace torch::indexing;
 
         if (x.dim() == 0 || y.dim() == 0) {
-#ifdef LIBTORCH_NO_EXCEPTIONS
-            return torch::empty({1});
-#else
-            throw std::invalid_argument(
-                "Unrecognized mode value. Please specify one of full, valid, same.");
-#endif
+            handle_exceptions<class torch::Tensor, std::invalid_argument>(
+                    torch::empty({1}), " Unrecognized mode value.Please specify one of full, valid, same.");
         }
         auto n_dims_x = x.dim();
         auto n_dims_y = y.dim();
@@ -99,12 +90,9 @@ namespace torchmedia::audio::functional {
         }
         const auto reshaped_x = x.reshape({num_signals, 1, x_size});
         const auto reshaped_y = y.flip(-1).reshape({num_signals, 1, y_size});
-        const auto conv_out =
-                torch::nn::functional::conv1d(reshaped_x, reshaped_y,
-                                              torch::nn::functional::Conv1dFuncOptions()
-                                              .stride(1)
-                                              .groups(num_signals)
-                                              .padding(y_size - 1));
+        const auto conv_out = torch::nn::functional::conv1d(
+                reshaped_x, reshaped_y,
+                torch::nn::functional::Conv1dFuncOptions().stride(1).groups(num_signals).padding(y_size - 1));
         const auto output_length = conv_out.size(-1);
         auto output_shape = new_shape;
         output_shape.push_back(output_length);
@@ -113,15 +101,13 @@ namespace torchmedia::audio::functional {
     }
 
 
-    inline auto amplitude_to_DB(tensor_t signal, const amplitude_to_db_option option = {})
-        -> tensor_t {
+    inline auto amplitude_to_DB(tensor_t signal, const amplitude_to_db_option option = {}) -> tensor_t {
         if (signal.is_complex()) {
             signal = signal.abs(); // 等价于 sqrt(real^2 + imag^2)
         }
         float amin_val = std::max(option.amin, std::numeric_limits<float>::min());
         const auto power = torch::pow(signal, 2.0);
-        auto db = 10.0 * torch::log10(clamp(
-                      power, amin_val, std::numeric_limits<float>::max()));
+        auto db = 10.0 * torch::log10(clamp(power, amin_val, std::numeric_limits<float>::max()));
         db = db * option.db_multiplier;
         if (option.apply_top_db) {
             const auto max_db = db.max().item<float>();
@@ -142,16 +128,11 @@ namespace torchmedia::audio::functional {
         int win_length = option._win_length;
         tensor_t window =
                 option._window.defined()
-                    ? option._window
-                    : torch::hann_window(win_length, tensor_options_t()
-                                         .dtype(signal.dtype())
-                                         .device(signal.device()));
-        auto spec_f = stft(signal, n_fft, hop_length, win_length, window,
-                           option._center, option._pad_mode,
-                           option._normalized,
-                           option._onesided,
-                           option._return_complex
-        );
+                        ? option._window
+                        : torch::hann_window(win_length,
+                                             tensor_options_t().dtype(signal.dtype()).device(signal.device()));
+        auto spec_f = stft(signal, n_fft, hop_length, win_length, window, option._center, option._pad_mode,
+                           option._normalized, option._onesided, option._return_complex);
         if (option._return_complex) {
             return spec_f;
         }
@@ -167,12 +148,11 @@ namespace torchmedia::audio::functional {
     }
 
 
-    inline auto mel_filter_bank(int n_mels, const double f_min, double f_max,
-                                const int sample_rate,
+    inline auto mel_filter_bank(int n_mels, const double f_min, double f_max, const int sample_rate,
                                 int n_stft_bins, // 通常 = n_fft/2 + 1
                                 const std::string &norm, // "slaney" 或 ""
                                 const std::string &mel_scale // "htk" / "slaney"
-    ) -> tensor_t {
+                                ) -> tensor_t {
         using namespace torch::indexing;
         // 如果外部没指定 f_max 或给了 <=0，则默认设为 Nyquist 频率
         if (f_max <= 0.0) {
@@ -277,8 +257,7 @@ namespace torchmedia::audio::functional {
         return mel_out;
     }
 
-    inline auto melspectrogram(const_tensor_lref_t waveform, const mel_spectrogram_option &opt)
-        -> tensor_t {
+    inline auto melspectrogram(const_tensor_lref_t waveform, const mel_spectrogram_option &opt) -> tensor_t {
         // 1) 构建 spectrogram_option
         spectrogram_option sp_opt;
         sp_opt._pad = opt.pad;
@@ -297,8 +276,7 @@ namespace torchmedia::audio::functional {
 
         // 3) 构建 mel filter bank
         const int n_stft_bins = opt.n_fft / 2 + 1;
-        const auto fb = mel_filter_bank(opt.n_mels, opt.f_min, opt.f_max, opt.sample_rate,
-                                        n_stft_bins, opt.norm,
+        const auto fb = mel_filter_bank(opt.n_mels, opt.f_min, opt.f_max, opt.sample_rate, n_stft_bins, opt.norm,
                                         opt.mel_scale); // [n_mels, n_stft_bins]
 
         // 4) 做 mel-scale
