@@ -35,6 +35,6 @@ namespace torchmedia::util {
 
     auto inline print_tensor(const tensor_t &t) -> void { fmt::print("{}", to_string(t)); }
 
-    auto inline tensor_wise_equals(const tensor_t &left, const tensor_t &right) { return torch::all(left == right) }
+    auto inline tensor_wise_equals(const tensor_t &left, const tensor_t &right) { return torch::all(left == right); }
 } // namespace torchmedia::util
 #endif
