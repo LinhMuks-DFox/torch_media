@@ -1,53 +1,227 @@
 #!/usr/bin/env python3
-
 import os
 import platform
 import subprocess
+import shutil
+import sys
 
-# 配置依赖信息
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
 DEPENDENCIES = {
     "fmt": {
         "repo": "https://github.com/fmtlib/fmt.git",
-        "branch": "master"
+        "branch": "master",
     },
     "libtorch": {
         "url": {
-            "linux": "",
+            "linux": "https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-2.5.1%2Bcpu.zip",
             "macos": "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.5.1.zip",
-            "windows": ""
+            "windows": "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.5.1%2Bcpu.zip",
         }
     },
-    # "libtorch_gpu": {
-    #     "url": {
-    #         "linux": "",
-    #         "macos": "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.5.1.zip",
-    #         "windows": ""
-    #     }
-    # },
+    # ffmpeg: build from source (shallow clone + configure + make install)
+    "ffmpeg": {
+        "repo": "https://github.com/FFmpeg/FFmpeg.git",
+        "branch": "master",
+    },
 }
 
-DEPENDENCE_DIR = os.path.join(os.getcwd(), "dependence")
+PROJECT_ROOT = os.getcwd()
+DEPENDENCE_DIR = os.path.join(PROJECT_ROOT, "dependence")
+FFMPEG_PREFIX = os.path.join(DEPENDENCE_DIR, "ffmpeg")  # install prefix
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _is_windows():
+    return platform.system().lower() == "windows"
+
+def _ensure_dir(path):
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _ensure_clean_dir(path):
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+def _cpu_jobs():
+    try:
+        # macOS
+        out = subprocess.check_output(["sysctl", "-n", "hw.ncpu"], stderr=subprocess.DEVNULL).decode().strip()
+        return int(out) if out else 4
+    except Exception:
+        pass
+    try:
+        # Linux
+        out = subprocess.check_output(["nproc"], stderr=subprocess.DEVNULL).decode().strip()
+        return int(out) if out else 4
+    except Exception:
+        return 4
+
+def _run(cmd, **kw):
+    print("+", " ".join(cmd))
+    subprocess.run(cmd, check=True, **kw)
+
+
+# ---------------------------------------------------------------------------
+# Core
+# ---------------------------------------------------------------------------
 def download_dependency(name, config):
+    print(f"Checking for {name}...")
+    final_dest_dir = os.path.join(DEPENDENCE_DIR, name)
+
+    # ffmpeg: treat as "installed prefix" presence
+    if name == "ffmpeg":
+        if os.path.isdir(FFMPEG_PREFIX) and os.listdir(FFMPEG_PREFIX):
+            print("ffmpeg already installed. Skipping.")
+            return
+        return build_and_install_ffmpeg(config)
+
+    # generic: repo or url
+    if os.path.isdir(final_dest_dir) and os.listdir(final_dest_dir):
+        print(f"{name} already downloaded. Skipping.")
+        return
+
     print(f"Downloading {name}...")
-    os.makedirs(DEPENDENCE_DIR, exist_ok=True)
+    _ensure_dir(DEPENDENCE_DIR)
 
     if "repo" in config:
-        dest_dir = os.path.join(DEPENDENCE_DIR, name)
-        if not os.path.exists(dest_dir):
-            subprocess.run(["git", "clone", config["repo"], dest_dir])
-        subprocess.run(["git", "-C", dest_dir, "checkout", config.get("branch", "master")])
+        _ensure_clean_dir(final_dest_dir)
+        _run(["git", "clone", "--depth", "1", config["repo"], final_dest_dir])
+        _run(["git", "-C", final_dest_dir, "checkout", config.get("branch", "master")])
+
     elif "url" in config:
-        url = config["url"].get(platform.system().lower())
-        if url:
-            zip_path = os.path.join(DEPENDENCE_DIR, f"{name}.zip")
-            subprocess.run(["curl", "-L", "-o", zip_path, url])
-            subprocess.run(["unzip", "-o", zip_path, "-d", DEPENDENCE_DIR])
-            os.remove(zip_path)
-    print(f"{name} downloaded.")
+        # (unchanged) download & extract archives
+        system = platform.system().lower()
+        if system == "darwin":
+            system = "macos"
+        url = config["url"].get(system)
+        if not url:
+            raise RuntimeError(f"No download URL for {name} on {system}")
+
+        # pick extension
+        ext = ".zip"
+        for e in (".tar.xz", ".tar.gz", ".tgz", ".7z", ".zip"):
+            if url.endswith(e) or e in url:
+                ext = e
+                break
+        archive_path = os.path.join(DEPENDENCE_DIR, f"{name}_archive{ext}")
+
+        print(f"Downloading from {url} -> {archive_path}")
+        _run(["curl", "-fL", "-C", "-", "-A", "Mozilla/5.0", "-o", archive_path, url])
+
+        temp_extract_dir = _ensure_clean_dir(os.path.join(DEPENDENCE_DIR, f"{name}_temp_extract"))
+        print(f"Extracting {archive_path}...")
+        _extract(archive_path, temp_extract_dir)
+
+        print(f"Moving content to {final_dest_dir}")
+        _move_extracted(temp_extract_dir, final_dest_dir)
+
+        # cleanup
+        shutil.rmtree(temp_extract_dir, ignore_errors=True)
+        try:
+            os.remove(archive_path)
+        except Exception:
+            pass
+
+    else:
+        raise RuntimeError(f"No repo or url provided for {name}")
+
+    print(f"{name} successfully processed.")
 
 
+def build_and_install_ffmpeg(config):
+    if _is_windows():
+        raise RuntimeError("Windows 本脚本不走源码构建 FFmpeg。请改用预编译包或在 MSYS2/WSL 下构建。")
+
+    print("Building ffmpeg from source...")
+    _ensure_dir(DEPENDENCE_DIR)
+
+    # 源码放到 dependence/_build/ffmpeg_src（临时目录）
+    src_root = _ensure_clean_dir(os.path.join(DEPENDENCE_DIR, "_build", "ffmpeg_src"))
+    # 目标前缀
+    prefix = FFMPEG_PREFIX
+
+    # 1) shallow clone
+    _run(["git", "clone", "--depth", "1", "--branch", config.get("branch", "master"),
+          config["repo"], src_root])
+
+    env = os.environ.copy()
+    # Homebrew pkg-config path for Apple Silicon, if present
+    hb_pc = "/opt/homebrew/lib/pkgconfig"
+    if os.path.isdir(hb_pc):
+        env["PKG_CONFIG_PATH"] = (env.get("PKG_CONFIG_PATH", "") + (":" if env.get("PKG_CONFIG_PATH") else "") + hb_pc)
+
+    # 2) configure: audio-only minimal set, shared libs, no CLI tools
+    cfg = [
+        "./configure",
+        f"--prefix={prefix}",
+        "--enable-shared", "--disable-static",
+        "--disable-programs", "--disable-doc", "--disable-debug",
+        "--disable-everything",
+        "--enable-avutil", "--enable-avcodec", "--enable-avformat", "--enable-swresample",
+        "--enable-protocol=file",
+        "--enable-parser=aac,mpegaudio,flac,vorbis,opus",
+        "--enable-demuxer=wav,mp3,aac,flac,ogg,opus",
+        "--enable-muxer=wav,mp3,adts,flac,ogg,opus",
+        "--enable-decoder=pcm_s16le,pcm_s24le,pcm_f32le,aac,mp3,flac,vorbis,opus",
+        "--enable-encoder=pcm_s16le,pcm_s24le,pcm_f32le,aac,flac",
+        # 如需 MP3 编码，先装 lame 后去掉注释：
+        # "--enable-libmp3lame",
+    ]
+
+    # 3) build & install
+    jobs = str(_cpu_jobs())
+    _run(["bash", "-lc", "make distclean || true"], cwd=src_root, env=env)
+    _run(cfg, cwd=src_root, env=env)
+    _run(["make", f"-j{jobs}"], cwd=src_root, env=env)
+    _run(["make", "install"], cwd=src_root, env=env)
+
+    print("ffmpeg successfully installed to", prefix)
+
+
+# ---------------------------------------------------------------------------
+# Archive helpers (for libtorch path; unchanged)
+# ---------------------------------------------------------------------------
+def _extract(archive_path, dest_dir):
+    ap = archive_path.lower()
+    if ap.endswith(".zip"):
+        _run(["unzip", "-o", archive_path, "-d", dest_dir], stdout=subprocess.DEVNULL)
+    elif ap.endswith(".7z"):
+        _run(["7z"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # existence check
+        _run(["7z", "x", archive_path, f"-o{dest_dir}"], stdout=subprocess.DEVNULL)
+    elif ap.endswith(".tar.xz"):
+        _run(["tar", "-xf", archive_path, "-C", dest_dir])
+    elif ap.endswith(".tar.gz") or ap.endswith(".tgz"):
+        _run(["tar", "-xzf", archive_path, "-C", dest_dir])
+    else:
+        raise RuntimeError(f"Unsupported archive format: {archive_path}")
+
+def _move_extracted(temp_dir, final_dest_dir):
+    entries = os.listdir(temp_dir)
+    _ensure_clean_dir(final_dest_dir)
+    if len(entries) == 1 and os.path.isdir(os.path.join(temp_dir, entries[0])):
+        shutil.move(os.path.join(temp_dir, entries[0]), final_dest_dir)
+    else:
+        for name in entries:
+            shutil.move(os.path.join(temp_dir, name), os.path.join(final_dest_dir, name))
+
+
+# ---------------------------------------------------------------------------
+# Entry
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     for dep, config in DEPENDENCIES.items():
-        download_dependency(dep, config)
+        try:
+            download_dependency(dep, config)
+        except Exception as e:
+            print(f"Failed to process dependency {dep}: {e}", file=sys.stderr)
+            # cleanup build temp
+            tmp = os.path.join(DEPENDENCE_DIR, f"{dep}_temp_extract")
+            if os.path.exists(tmp):
+                shutil.rmtree(tmp, ignore_errors=True)
+            print(f"Cleanup for {dep} done.")
