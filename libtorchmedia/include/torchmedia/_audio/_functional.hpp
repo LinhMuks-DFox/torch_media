@@ -44,14 +44,19 @@ namespace torchmedia::audio::functional {
                         torch::empty({1}), " Unrecognized mode value.Please specify one of full, valid, same.");
         }
     }
+    inline auto db_to_amplitude(tensor_t x, float ref, float power) -> tensor_t {
+        return torch::pow(10.0, x / (20.0 * power)) * ref;
+    }
 
     inline auto convolve(tensor_t x, tensor_t y, const convolve_mode mode) -> tensor_t {
         using namespace torch::indexing;
 
         if (x.dim() == 0 || y.dim() == 0) {
-            handle_exceptions<class torch::Tensor, std::invalid_argument>(
-                    torch::empty({1}), " Unrecognized mode value.Please specify one of full, valid, same.");
+            handle_exceptions<class torch::Tensor, std::invalid_argument>(torch::empty({1}),
+                                                                          "Inputs must be at least 1D.");
         }
+
+        // 1. 维度对齐 (Align Dimensions)
         auto n_dims_x = x.dim();
         auto n_dims_y = y.dim();
         if (n_dims_x < n_dims_y) {
@@ -65,38 +70,68 @@ namespace torchmedia::audio::functional {
             }
             n_dims_y = n_dims_x;
         }
+
+        // 确保 x 是较长的信号 (虽然数学上卷积可交换，但通常用短的做 kernel 比较直观)
+        // 这里的 swap 逻辑保留原版，视需求可去
         if (x.size(-1) < y.size(-1)) {
             std::swap(x, y);
         }
-        auto x_size = x.size(-1);
-        auto y_size = y.size(-1);
+
+        const auto x_size = x.size(-1);
+        const auto y_size = y.size(-1);
         const auto leading_dims_count = n_dims_x - 1;
         const auto shape_x = x.sizes();
         const auto shape_y = y.sizes();
-        std::vector<int64_t> new_shape(leading_dims_count);
 
+        // 2. 广播 (Broadcasting) 计算共同形状
+        std::vector<int64_t> new_shape(leading_dims_count);
         for (int i = 0; i < leading_dims_count; i++) {
             new_shape[i] = std::max(shape_x[i], shape_y[i]);
         }
+
         auto broadcast_shape_x = new_shape;
         broadcast_shape_x.push_back(x_size);
         x = x.broadcast_to(broadcast_shape_x);
+
         auto broadcast_shape_y = new_shape;
         broadcast_shape_y.push_back(y_size);
         y = y.broadcast_to(broadcast_shape_y);
+
+        // 3. 计算总信号数量 (Flatten Batch)
         auto num_signals = 1LL;
         for (int i = 0; i < leading_dims_count; i++) {
             num_signals *= new_shape[i];
         }
-        const auto reshaped_x = x.reshape({num_signals, 1, x_size});
+
+        // 4. Reshape 为分组卷积 (Grouped Convolution) 兼容的形状
+        // 关键修复:
+        // Input  => [1, num_signals, x_size]  (Batch=1, Channels=num_signals)
+        // Weight => [num_signals, 1, y_size]  (Out=num_signals, In/Groups=1)
+        const auto reshaped_x = x.reshape({1, num_signals, x_size});
+
+        // 注意：Convolution 实际上是互相关，严格数学卷积需要 flip kernel。
+        // 原版代码有 flip，这里保留。
         const auto reshaped_y = y.flip(-1).reshape({num_signals, 1, y_size});
-        const auto conv_out = torch::nn::functional::conv1d(
-                reshaped_x, reshaped_y,
-                torch::nn::functional::Conv1dFuncOptions().stride(1).groups(num_signals).padding(y_size - 1));
+
+        // 5. 执行卷积
+        // padding(y_size - 1) 是为了实现 'full' 模式，之后再裁切
+        const auto conv_out =
+                torch::nn::functional::conv1d(reshaped_x, reshaped_y,
+                                              torch::nn::functional::Conv1dFuncOptions()
+                                                      .stride(1)
+                                                      .groups(num_signals) // 分组数 = 信号数，实现 Depthwise
+                                                      .padding(y_size - 1));
+
+        // 6. 恢复形状
+        // conv_out 目前是 [1, num_signals, out_len]
         const auto output_length = conv_out.size(-1);
         auto output_shape = new_shape;
         output_shape.push_back(output_length);
+
+        // 先 reshape 去掉 batch=1 维度，再 reshape 回广播后的维度
         const auto result = conv_out.reshape(output_shape);
+
+        // 7. 应用裁剪模式 (Full/Valid/Same)
         return _apply_convolve_mode(result, x_size, y_size, mode);
     }
 
