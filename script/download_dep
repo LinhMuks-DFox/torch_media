@@ -20,24 +20,19 @@ DEPENDENCIES = {
             "windows": "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.5.1%2Bcpu.zip",
         }
     },
-    # ffmpeg: build from source (shallow clone + configure + make install)
-    "ffmpeg": {
-        "repo": "https://github.com/FFmpeg/FFmpeg.git",
-        "branch": "master",
-    },
+    # NOTE: audio I/O no longer depends on FFmpeg. WAV is handled by the vendored, header-only
+    # dr_wav (libtorchmedia/include/torchmedia/_audio/_vendor/dr_wav.h). FFmpeg is optional and
+    # only needed for the future TORCHMEDIA_WITH_FFMPEG path (compressed-format encoding / Opus /
+    # video), so it is intentionally not fetched here.
 }
 
 PROJECT_ROOT = os.getcwd()
 DEPENDENCE_DIR = os.path.join(PROJECT_ROOT, "dependence")
-FFMPEG_PREFIX = os.path.join(DEPENDENCE_DIR, "ffmpeg")  # install prefix
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _is_windows():
-    return platform.system().lower() == "windows"
-
 def _ensure_dir(path):
     os.makedirs(path, exist_ok=True)
     return path
@@ -47,20 +42,6 @@ def _ensure_clean_dir(path):
         shutil.rmtree(path)
     os.makedirs(path, exist_ok=True)
     return path
-
-def _cpu_jobs():
-    try:
-        # macOS
-        out = subprocess.check_output(["sysctl", "-n", "hw.ncpu"], stderr=subprocess.DEVNULL).decode().strip()
-        return int(out) if out else 4
-    except Exception:
-        pass
-    try:
-        # Linux
-        out = subprocess.check_output(["nproc"], stderr=subprocess.DEVNULL).decode().strip()
-        return int(out) if out else 4
-    except Exception:
-        return 4
 
 def _run(cmd, **kw):
     print("+", " ".join(cmd))
@@ -74,14 +55,6 @@ def download_dependency(name, config):
     print(f"Checking for {name}...")
     final_dest_dir = os.path.join(DEPENDENCE_DIR, name)
 
-    # ffmpeg: treat as "installed prefix" presence
-    if name == "ffmpeg":
-        if os.path.isdir(FFMPEG_PREFIX) and os.listdir(FFMPEG_PREFIX):
-            print("ffmpeg already installed. Skipping.")
-            return
-        return build_and_install_ffmpeg(config)
-
-    # generic: repo or url
     if os.path.isdir(final_dest_dir) and os.listdir(final_dest_dir):
         print(f"{name} already downloaded. Skipping.")
         return
@@ -95,7 +68,6 @@ def download_dependency(name, config):
         _run(["git", "-C", final_dest_dir, "checkout", config.get("branch", "master")])
 
     elif "url" in config:
-        # (unchanged) download & extract archives
         system = platform.system().lower()
         if system == "darwin":
             system = "macos"
@@ -134,65 +106,14 @@ def download_dependency(name, config):
     print(f"{name} successfully processed.")
 
 
-def build_and_install_ffmpeg(config):
-    if _is_windows():
-        raise RuntimeError("Windows 本脚本不走源码构建 FFmpeg。请改用预编译包或在 MSYS2/WSL 下构建。")
-
-    print("Building ffmpeg from source...")
-    _ensure_dir(DEPENDENCE_DIR)
-
-    # 源码放到 dependence/_build/ffmpeg_src（临时目录）
-    src_root = _ensure_clean_dir(os.path.join(DEPENDENCE_DIR, "_build", "ffmpeg_src"))
-    # 目标前缀
-    prefix = FFMPEG_PREFIX
-
-    # 1) shallow clone
-    _run(["git", "clone", "--depth", "1", "--branch", config.get("branch", "master"),
-          config["repo"], src_root])
-
-    env = os.environ.copy()
-    # Homebrew pkg-config path for Apple Silicon, if present
-    hb_pc = "/opt/homebrew/lib/pkgconfig"
-    if os.path.isdir(hb_pc):
-        env["PKG_CONFIG_PATH"] = (env.get("PKG_CONFIG_PATH", "") + (":" if env.get("PKG_CONFIG_PATH") else "") + hb_pc)
-
-    # 2) configure: audio-only minimal set, shared libs, no CLI tools
-    cfg = [
-        "./configure",
-        f"--prefix={prefix}",
-        "--enable-shared", "--disable-static",
-        "--disable-programs", "--disable-doc", "--disable-debug",
-        "--disable-everything",
-        "--enable-avutil", "--enable-avcodec", "--enable-avformat", "--enable-swresample",
-        "--enable-protocol=file",
-        "--enable-parser=aac,mpegaudio,flac,vorbis,opus",
-        "--enable-demuxer=wav,mp3,aac,flac,ogg,opus",
-        "--enable-muxer=wav,mp3,adts,flac,ogg,opus",
-        "--enable-decoder=pcm_s16le,pcm_s24le,pcm_f32le,aac,mp3,flac,vorbis,opus",
-        "--enable-encoder=pcm_s16le,pcm_s24le,pcm_f32le,aac,flac",
-        # 如需 MP3 编码，先装 lame 后去掉注释：
-        # "--enable-libmp3lame",
-    ]
-
-    # 3) build & install
-    jobs = str(_cpu_jobs())
-    _run(["bash", "-lc", "make distclean || true"], cwd=src_root, env=env)
-    _run(cfg, cwd=src_root, env=env)
-    _run(["make", f"-j{jobs}"], cwd=src_root, env=env)
-    _run(["make", "install"], cwd=src_root, env=env)
-
-    print("ffmpeg successfully installed to", prefix)
-
-
 # ---------------------------------------------------------------------------
-# Archive helpers (for libtorch path; unchanged)
+# Archive helpers (libtorch path)
 # ---------------------------------------------------------------------------
 def _extract(archive_path, dest_dir):
     ap = archive_path.lower()
     if ap.endswith(".zip"):
         _run(["unzip", "-o", archive_path, "-d", dest_dir], stdout=subprocess.DEVNULL)
     elif ap.endswith(".7z"):
-        _run(["7z"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # existence check
         _run(["7z", "x", archive_path, f"-o{dest_dir}"], stdout=subprocess.DEVNULL)
     elif ap.endswith(".tar.xz"):
         _run(["tar", "-xf", archive_path, "-C", dest_dir])
@@ -207,8 +128,8 @@ def _move_extracted(temp_dir, final_dest_dir):
     if len(entries) == 1 and os.path.isdir(os.path.join(temp_dir, entries[0])):
         shutil.move(os.path.join(temp_dir, entries[0]), final_dest_dir)
     else:
-        for name in entries:
-            shutil.move(os.path.join(temp_dir, name), os.path.join(final_dest_dir, name))
+        for entry in entries:
+            shutil.move(os.path.join(temp_dir, entry), os.path.join(final_dest_dir, entry))
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +141,6 @@ if __name__ == "__main__":
             download_dependency(dep, config)
         except Exception as e:
             print(f"Failed to process dependency {dep}: {e}", file=sys.stderr)
-            # cleanup build temp
             tmp = os.path.join(DEPENDENCE_DIR, f"{dep}_temp_extract")
             if os.path.exists(tmp):
                 shutil.rmtree(tmp, ignore_errors=True)

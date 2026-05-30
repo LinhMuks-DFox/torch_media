@@ -1,0 +1,10 @@
+TorchMedia bundles the third-party source below. Each is under a permissive license compatible
+with TorchMedia's MIT license. The full upstream license text is retained inside each vendored file.
+
+================================================================================
+dr_wav  (part of dr_libs)
+  Upstream:  https://github.com/mackron/dr_libs
+  Author:    David Reid <mackron@gmail.com>
+  Vendored:  libtorchmedia/include/torchmedia/_audio/_vendor/dr_wav.h
+  License:   public domain (Unlicense) OR MIT-0, at your option.
+================================================================================

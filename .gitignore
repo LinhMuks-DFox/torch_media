@@ -1,16 +1,27 @@
+# dependencies (fetched by script/download_dep)
 dependence/
+
+# build output
+build/
+cmake-build-*/
+compile_commands.json
+
+# editor / IDE
 .vscode/
+.idea/
+
+# legacy xmake cache (build system migrated to CMake)
 .xmake/
-cmake*
+
+# python
+.venv/
+__pycache__/
+*.mypy_cache
+
+# generated media / artifacts
 *.wav
 *.mp3
-*.mypy_cache
-__pycache__/
-build/
 *.png
 *.jpg
 *.pt
 *.pdf
-compile_commands.json
-CMakelists.txt
-.idea/
