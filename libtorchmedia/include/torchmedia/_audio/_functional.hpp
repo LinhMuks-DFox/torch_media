@@ -12,40 +12,26 @@
 namespace torchmedia::audio::functional {
     enum convolve_mode { full, valid, same };
 
-    auto inline _check_shape_compatible(const tensor_t &x, const tensor_t &y) -> bool {
-        if (x.ndimension() != y.ndimension())
-            return false;
-        for (auto i = 0; i < x.ndimension() - 1; i++) {
-            const auto xi = x.size(i);
-            const auto yi = y.size(i);
-            if (xi == yi || xi == 1 || yi == 1)
-                continue;
-            return false;
-        }
-        return true;
-    }
-
     inline auto _apply_convolve_mode(tensor_t conv_result, const int64_t x_length, const int64_t y_length,
                                      const convolve_mode mode) -> tensor_t {
-        switch (mode) {
-            case full:
-                return conv_result;
-            case valid: {
-                const auto target_length = std::max(x_length, y_length) - std::min(x_length, y_length) + 1;
-                auto start_idx = (conv_result.size(-1) - target_length) / 2;
-                return conv_result.slice(-1, start_idx, start_idx + target_length);
-            }
-            case same: {
-                auto start_idx = (conv_result.size(-1) - x_length) / 2;
-                return conv_result.slice(-1, start_idx, start_idx + x_length);
-            }
-            default:
-                handle_exceptions<class torch::Tensor, std::invalid_argument>(
-                        torch::empty({1}), " Unrecognized mode value.Please specify one of full, valid, same.");
+        if (mode == valid) {
+            const auto target_length = std::max(x_length, y_length) - std::min(x_length, y_length) + 1;
+            const auto start_idx = (conv_result.size(-1) - target_length) / 2;
+            return conv_result.slice(-1, start_idx, start_idx + target_length);
         }
+        if (mode == same) {
+            const auto start_idx = (conv_result.size(-1) - x_length) / 2;
+            return conv_result.slice(-1, start_idx, start_idx + x_length);
+        }
+        if (mode != full) {
+            handle_exceptions<torch::Tensor, std::invalid_argument>(
+                    torch::empty({1}), "Unrecognized convolve mode. Use full, valid, or same.");
+        }
+        return conv_result; // full mode (and the no-exceptions fallthrough)
     }
     inline auto db_to_amplitude(tensor_t x, float ref, float power) -> tensor_t {
-        return torch::pow(10.0, x / (20.0 * power)) * ref;
+        // torchaudio: DB_to_amplitude(x, ref, power) = ref * (10^(0.1*x))^power
+        return ref * torch::pow(torch::pow(10.0, 0.1 * x), power);
     }
 
     inline auto convolve(tensor_t x, tensor_t y, const convolve_mode mode) -> tensor_t {
@@ -71,8 +57,11 @@ namespace torchmedia::audio::functional {
             n_dims_y = n_dims_x;
         }
 
-        // 确保 x 是较长的信号 (虽然数学上卷积可交换，但通常用短的做 kernel 比较直观)
-        // 这里的 swap 逻辑保留原版，视需求可去
+        // torchaudio's 'same'/'valid' crop is defined w.r.t. the ORIGINAL first input x, so record its
+        // length BEFORE the swap. Convolution is commutative, so swapping to keep the longer signal first
+        // is fine for the math; only the final crop length must use the original x length.
+        const auto original_x_size = x.size(-1);
+        const auto original_y_size = y.size(-1);
         if (x.size(-1) < y.size(-1)) {
             std::swap(x, y);
         }
@@ -131,22 +120,24 @@ namespace torchmedia::audio::functional {
         // 先 reshape 去掉 batch=1 维度，再 reshape 回广播后的维度
         const auto result = conv_out.reshape(output_shape);
 
-        // 7. 应用裁剪模式 (Full/Valid/Same)
-        return _apply_convolve_mode(result, x_size, y_size, mode);
+        // 7. 应用裁剪模式 (Full/Valid/Same) — crop length uses the ORIGINAL x/y lengths
+        return _apply_convolve_mode(result, original_x_size, original_y_size, mode);
     }
 
 
     inline auto amplitude_to_DB(tensor_t signal, const amplitude_to_db_option option = {}) -> tensor_t {
         if (signal.is_complex()) {
-            signal = signal.abs(); // 等价于 sqrt(real^2 + imag^2)
+            signal = signal.abs(); // sqrt(real^2 + imag^2)
         }
-        float amin_val = std::max(option.amin, std::numeric_limits<float>::min());
-        const auto power = torch::pow(signal, 2.0);
-        auto db = 10.0 * torch::log10(clamp(power, amin_val, std::numeric_limits<float>::max()));
-        db = db * option.db_multiplier;
+        // torchaudio: db = multiplier*log10(clamp(x, amin)) - multiplier*db_multiplier.
+        // `signal` is already power (multiplier=10) or magnitude (multiplier=20) — do NOT square here.
+        const float amin_val = std::max(option.amin, std::numeric_limits<float>::min());
+        auto db = option.multiplier * torch::log10(torch::clamp_min(signal, amin_val));
+        db = db - option.multiplier * option.db_multiplier;
         if (option.apply_top_db) {
-            const auto max_db = db.max().item<float>();
-            db = max(db, torch::tensor(max_db - option.top_db, db.options()));
+            // per-sample max over the (freq, time) dims for batched input
+            const auto max_db = db.amax({-2, -1}, /*keepdim=*/true);
+            db = torch::maximum(db, max_db - option.top_db);
         }
 
         return db;
@@ -166,20 +157,25 @@ namespace torchmedia::audio::functional {
                         ? option._window
                         : torch::hann_window(win_length,
                                              tensor_options_t().dtype(signal.dtype()).device(signal.device()));
-        auto spec_f = stft(signal, n_fft, hop_length, win_length, window, option._center, option._pad_mode,
-                           option._normalized, option._onesided, option._return_complex);
+        // Always compute a complex STFT with normalized=false, then normalize ONCE on the complex
+        // amplitude before applying power. This matches torchaudio and fixes: (a) double normalization
+        // (normalized was passed to stft AND applied again), (b) the wrong normalization exponent
+        // (dividing the power spectrum by sqrt(sum win^2) instead of by (sum win^2)^(power/2)), and
+        // (c) abs() over stft's view_as_real output when return_complex was false.
+        auto spec_f = torch::stft(signal, n_fft, hop_length, win_length, window, option._center,
+                                  option._pad_mode, /*normalized=*/false, option._onesided,
+                                  /*return_complex=*/true);
+        if (option._normalized) {
+            if (option._normalize_method == "window") {
+                spec_f = spec_f / window.pow(2).sum().sqrt();
+            } else if (option._normalize_method == "frame_length") {
+                spec_f = spec_f / win_length;
+            }
+        }
         if (option._return_complex) {
             return spec_f;
         }
-        auto spec = torch::pow(torch::abs(spec_f), option._power);
-        if (option._normalized) {
-            if (option._normalize_method == "window") {
-                spec /= window.pow(2).sum().sqrt();
-            } else if (option._normalize_method == "frame_length") {
-                spec /= win_length;
-            }
-        }
-        return spec;
+        return torch::pow(torch::abs(spec_f), option._power);
     }
 
 
@@ -195,19 +191,32 @@ namespace torchmedia::audio::functional {
         }
 
         // 一些辅助函数：赫兹转 mel，mel 转赫兹
-        auto hz_to_mel = [&](const double freq) {
+        // Hz<->mel. HTK: mel = 2595*log10(1+f/700). Slaney: piecewise (linear < 1000Hz, log >= 1000Hz).
+        auto hz_to_mel = [&](const double freq) -> double {
             if (mel_scale != "slaney") {
-                // HTK 风格
                 return 2595.0 * std::log10(1.0 + freq / 700.0);
             }
-            // Slaney 风格公式 (approx)
-            return 2595.0 * std::log10(1.0 + freq / 700.0);
+            const double f_sp = 200.0 / 3.0;
+            const double min_log_hz = 1000.0;
+            const double min_log_mel = min_log_hz / f_sp;
+            const double logstep = std::log(6.4) / 27.0;
+            if (freq >= min_log_hz) {
+                return min_log_mel + std::log(freq / min_log_hz) / logstep;
+            }
+            return freq / f_sp;
         };
-        auto mel_to_hz = [&](const double mel) {
+        auto mel_to_hz = [&](const double mel) -> double {
             if (mel_scale != "slaney") {
                 return 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
             }
-            return 700.0 * (std::pow(10.0, mel / 2595.0) - 1.0);
+            const double f_sp = 200.0 / 3.0;
+            const double min_log_hz = 1000.0;
+            const double min_log_mel = min_log_hz / f_sp;
+            const double logstep = std::log(6.4) / 27.0;
+            if (mel >= min_log_mel) {
+                return min_log_hz * std::exp(logstep * (mel - min_log_mel));
+            }
+            return f_sp * mel;
         };
 
         const double mel_min = hz_to_mel(f_min);

@@ -83,10 +83,16 @@ namespace torchmedia::audio::functional {
     } spectrogram_option_t;
 
     typedef struct amplitude_to_db_option {
+        float multiplier = 10.0f; // 10 for a power spectrogram, 20 for a magnitude spectrogram
         float amin = 1e-10f;
         float top_db = 80.0f;
         float db_multiplier = 1.0f;
         bool apply_top_db = true;
+
+        auto set_multiplier(const float m) -> amplitude_to_db_option & {
+            multiplier = m;
+            return *this;
+        }
 
         auto set_amin(const float a) -> amplitude_to_db_option & {
             amin = a;
