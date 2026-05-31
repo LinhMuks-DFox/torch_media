@@ -32,6 +32,12 @@ if(TORCHMEDIA_COVERAGE)
     add_link_options(-fprofile-instr-generate -fcoverage-mapping)
 endif()
 
+# --- optional plotting backend (matplot++ / gnuplot; opt-in) ---
+option(TORCHMEDIA_WITH_PLOT "Build the optional torchmedia::plot module (matplot++ / gnuplot)" OFF)
+if(TORCHMEDIA_WITH_PLOT)
+    add_subdirectory(${TORCHMEDIA_DEPENDENCE_DIR}/matplotplusplus matplotplusplus)
+endif()
+
 # --- header-only library target ---
 add_subdirectory(libtorchmedia)
 

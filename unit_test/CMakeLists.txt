@@ -4,3 +4,6 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 add_subdirectory(audio)
 add_subdirectory(vision)
+if(TORCHMEDIA_WITH_PLOT)
+    add_subdirectory(plot)
+endif()

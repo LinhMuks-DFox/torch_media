@@ -58,6 +58,9 @@ See `develop_log/README.md` for file conventions, templates, and naming.
 - Audio I/O: WAV via vendored header-only `dr_wav`; the implementation block is emitted in the one TU
   that defines `TORCHMEDIA_IO_IMPLEMENTATION` (each test's `main.cpp` does this).
 - Unit tests live in `unit_test/` and double as usage examples.
+- Optional plotting: `torchmedia::plot` (matplot++ / gnuplot) is **opt-in** via `-DTORCHMEDIA_WITH_PLOT=ON`
+  (needs gnuplot at runtime + `dependence/matplotplusplus`). The core audio/vision stays header-only and
+  does not require it; `torchmedia.hpp` does not include `plot.hpp` — use `#include <torchmedia/plot.hpp>`.
 
 ## Testing & coverage
 

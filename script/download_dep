@@ -20,6 +20,11 @@ DEPENDENCIES = {
             "windows": "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.5.1%2Bcpu.zip",
         }
     },
+    # matplot++: only for the optional torchmedia::plot module (TORCHMEDIA_WITH_PLOT=ON); needs gnuplot at runtime.
+    "matplotplusplus": {
+        "repo": "https://github.com/alandefreitas/matplotplusplus.git",
+        "branch": "master",
+    },
     # NOTE: audio I/O no longer depends on FFmpeg. WAV is handled by the vendored, header-only
     # dr_wav (libtorchmedia/include/torchmedia/_audio/_vendor/dr_wav.h). FFmpeg is optional and
     # only needed for the future TORCHMEDIA_WITH_FFMPEG path (compressed-format encoding / Opus /
