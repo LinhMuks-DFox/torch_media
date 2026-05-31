@@ -33,25 +33,56 @@ namespace torchmedia::plot {
         }
     } // namespace detail
 
-    // Line plot of a waveform ([T], or the first channel of [C, T]).
+    // Chaining plot builder:
+    //   Plotter().heatmap(spec).colorbar().title("mel").xlabel("time").save("mel.png");
+    //   Plotter().waveform(wav).ylabel("amp").save("wave.png");
+    class Plotter {
+    public:
+        Plotter() { matplot::cla(); }
+
+        // Line plot of a waveform ([T] or the first channel of [C, T]).
+        Plotter &waveform(const tensor_t &wav) {
+            const auto w = wav.dim() > 1 ? wav.select(0, 0) : wav;
+            matplot::plot(detail::to_vector(w));
+            return *this;
+        }
+
+        // Heatmap of a [F, T] matrix (or the last two dims of a higher-rank tensor).
+        Plotter &heatmap(const tensor_t &mat) {
+            const auto m = mat.dim() > 2 ? mat.reshape({mat.size(-2), mat.size(-1)}) : mat;
+            matplot::imagesc(detail::to_matrix(m));
+            return *this;
+        }
+
+        Plotter &title(const std::string &t) {
+            matplot::title(t);
+            return *this;
+        }
+        Plotter &xlabel(const std::string &s) {
+            matplot::xlabel(s);
+            return *this;
+        }
+        Plotter &ylabel(const std::string &s) {
+            matplot::ylabel(s);
+            return *this;
+        }
+        Plotter &colorbar() {
+            matplot::colorbar();
+            return *this;
+        }
+        Plotter &save(const std::string &path) {
+            matplot::save(path);
+            return *this;
+        }
+    };
+
+    // Convenience wrappers built on Plotter.
     inline auto save_waveform(const tensor_t &wav, const std::string &path) -> void {
-        const auto w = wav.dim() > 1 ? wav.select(0, 0) : wav;
-        matplot::cla();
-        matplot::plot(detail::to_vector(w));
-        matplot::xlabel("sample");
-        matplot::ylabel("amplitude");
-        matplot::save(path);
+        Plotter().waveform(wav).xlabel("sample").ylabel("amplitude").save(path);
     }
 
-    // Heatmap of a [F, T] spectrogram (or the last two dims of a higher-rank tensor).
     inline auto save_spectrogram(const tensor_t &spec, const std::string &path) -> void {
-        const auto s = spec.dim() > 2 ? spec.reshape({spec.size(-2), spec.size(-1)}) : spec;
-        matplot::cla();
-        matplot::imagesc(detail::to_matrix(s));
-        matplot::colorbar();
-        matplot::xlabel("time");
-        matplot::ylabel("frequency");
-        matplot::save(path);
+        Plotter().heatmap(spec).colorbar().xlabel("time").ylabel("frequency").save(path);
     }
 
 } // namespace torchmedia::plot

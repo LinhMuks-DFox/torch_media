@@ -44,6 +44,7 @@ matplot++ and needs gnuplot at runtime (gnuplot 6.0 present locally).
 
 ## Tasks
 - [x] [task08 — torchmedia::plot via matplot++](tasks/task08-plot-matplotpp.md)
+- [x] [task09 — Plotter chaining API](tasks/task09-plotter-api.md)
 
 ## Issues / Gotchas
 - matplot++ is a sizable CMake build; first configure/build is slow.
@@ -54,7 +55,7 @@ matplot++ and needs gnuplot at runtime (gnuplot 6.0 present locally).
   noise, not fatal. Follow-up: bump matplot++ or suppress the gnuplot stderr stream.
 
 ## Open / TODO (carry-over)
-- Plotter() chaining API; colormap options; mel/MFCC convenience plots.
+- colormap options; mel/MFCC convenience plots; gnuplot 6.0 warning suppression.
 - Earlier carry-overs: vision Tier-2 transforms, mel_filter_bank vectorization.
 
 ## Agent log
@@ -65,3 +66,6 @@ matplot++ and needs gnuplot at runtime (gnuplot 6.0 present locally).
   over torch tensors; smoke test + plot_test ctest target. Built with -DTORCHMEDIA_WITH_PLOT=ON; both PNGs
   render correctly (verified visually). Core build unchanged with the option OFF. matplot++ added to
   download_dep; gnuplot noted in CLAUDE.md. (gnuplot 6.0 multiplot warning recorded above — images are correct.)
+- 2026-05-31 [ai] task09: added Plotter() chaining API (heatmap/waveform/title/xlabel/ylabel/colorbar/save);
+  refactored save_waveform/save_spectrogram onto it. plot_test 4/4 green; fixed an async-gnuplot test flake
+  by polling for output files instead of checking exists() immediately after save.
