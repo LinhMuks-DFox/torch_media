@@ -1,4 +1,6 @@
 #pragma once
+#include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include "torch/csrc/autograd/generated/variable_factories.h"
 #ifndef LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_HPP
@@ -328,6 +330,130 @@ namespace torchmedia::audio::functional {
         // mel_spectrogram => [..., n_mels, time]
 
         return mel_spectrogram;
+    }
+
+    // DCT-II matrix of shape [n_mels, n_mfcc] (mirrors torchaudio.functional.create_dct).
+    // dct[n,k] = cos(pi/n_mels * (n+0.5) * k); norm=="" -> *2; norm=="ortho" -> col0 *= 1/sqrt(2), then *sqrt(2/n_mels).
+    inline auto create_dct(int n_mfcc, int n_mels, const std::string &norm = "ortho") -> tensor_t {
+        const double pi = std::acos(-1.0);
+        const auto n = torch::arange(n_mels, torch::kFloat64).unsqueeze(1); // [n_mels, 1]
+        const auto k = torch::arange(n_mfcc, torch::kFloat64).unsqueeze(0); // [1, n_mfcc]
+        auto dct = torch::cos((pi / n_mels) * (n + 0.5) * k);               // [n_mels, n_mfcc]
+        if (norm.empty()) {
+            dct = dct * 2.0;
+        } else { // "ortho"
+            dct.select(1, 0).mul_(1.0 / std::sqrt(2.0));
+            dct = dct * std::sqrt(2.0 / n_mels);
+        }
+        return dct.to(torch::kFloat32);
+    }
+
+    // MFCC: DCT over the dB (or log) mel spectrogram (mirrors torchaudio.transforms.MFCC).
+    inline auto mfcc(const_tensor_lref_t waveform, const mfcc_option &opt) -> tensor_t {
+        const auto mel_spec = melspectrogram(waveform, opt.mel); // [..., n_mels, time]
+        tensor_t feat;
+        if (opt.log_mels) {
+            feat = torch::log(mel_spec + 1e-6);
+        } else {
+            const auto db_opt = amplitude_to_db_option()
+                                        .set_multiplier(10.0f)
+                                        .set_amin(1e-10f)
+                                        .set_db_multiplier(0.0f)
+                                        .set_top_db(opt.top_db);
+            feat = amplitude_to_DB(mel_spec, db_opt);
+        }
+        const auto dct_mat = create_dct(opt.n_mfcc, opt.mel.n_mels, opt.norm); // [n_mels, n_mfcc]
+        // apply the DCT along the mel axis: [..., n_mels, time] -> [..., n_mfcc, time]
+        return torch::matmul(feat.transpose(-2, -1), dct_mat).transpose(-2, -1);
+    }
+
+    // Griffin-Lim phase reconstruction from a (power) spectrogram (mirrors torchaudio.functional.griffinlim).
+    // Uses torch::istft/stft (the same ATen ops torchaudio calls) so rand_init=false is reproducible.
+    inline auto griffinlim(const_tensor_lref_t specgram, const griffinlim_option &opt) -> tensor_t {
+        const auto window = opt.window.defined()
+                                    ? opt.window
+                                    : torch::hann_window(opt.win_length, tensor_options_t()
+                                                                                 .dtype(torch::kFloat)
+                                                                                 .device(specgram.device()));
+        const double momentum = opt.momentum / (1.0 + opt.momentum);
+
+        const auto shape = specgram.sizes().vec();
+        const int64_t freq = shape[shape.size() - 2];
+        const int64_t frames = shape[shape.size() - 1];
+        auto spec = specgram.reshape({-1, freq, frames}).pow(1.0 / opt.power); // magnitude
+
+        tensor_t angles;
+        if (opt.rand_init) {
+            const auto r = torch::rand(spec.sizes(), spec.options());
+            angles = torch::polar(torch::ones_like(r), 2.0 * std::acos(-1.0) * r); // unit modulus, random phase
+        } else {
+            angles = torch::ones(spec.sizes(), spec.options().dtype(torch::kComplexFloat)); // 1 + 0j
+        }
+
+        tensor_t tprev = torch::zeros({}, spec.options());
+        for (int i = 0; i < opt.n_iter; i++) {
+            const auto inverse = torch::istft(spec * angles, opt.n_fft, opt.hop_length, opt.win_length, window,
+                                              /*center=*/true, /*normalized=*/false, /*onesided=*/true,
+                                              /*length=*/c10::nullopt, /*return_complex=*/false);
+            const auto rebuilt = torch::stft(inverse, opt.n_fft, opt.hop_length, opt.win_length, window,
+                                             /*center=*/true, /*pad_mode=*/"reflect", /*normalized=*/false,
+                                             /*onesided=*/true, /*return_complex=*/true);
+            angles = rebuilt;
+            if (opt.momentum > 0.0) {
+                angles = angles - tprev * momentum;
+            }
+            angles = angles / (angles.abs() + 1e-16);
+            tprev = rebuilt;
+        }
+
+        const c10::optional<int64_t> length = opt.length > 0 ? c10::optional<int64_t>(opt.length) : c10::nullopt;
+        auto waveform = torch::istft(spec * angles, opt.n_fft, opt.hop_length, opt.win_length, window,
+                                     /*center=*/true, /*normalized=*/false, /*onesided=*/true, length,
+                                     /*return_complex=*/false);
+
+        std::vector<int64_t> out_shape(shape.begin(), shape.end() - 2);
+        out_shape.push_back(waveform.size(-1));
+        return waveform.reshape(out_shape);
+    }
+
+    // Band-limited sinc resampling expressed as a strided conv1d (mirrors torchaudio.functional.resample,
+    // resampling_method="sinc_interp_hann"). Uses the same ATen ops, so it matches torchaudio point-wise.
+    inline auto resample(const_tensor_lref_t waveform, int orig_freq, int new_freq, const resample_option &opt = {})
+            -> tensor_t {
+        const int gcd = std::gcd(orig_freq, new_freq);
+        const int of = orig_freq / gcd;
+        const int nf = new_freq / gcd;
+        const int lfw = opt.lowpass_filter_width;
+        const double base_freq = std::min(of, nf) * opt.rolloff;
+        const int width = static_cast<int>(std::ceil(lfw * of / base_freq));
+        const double pi = std::acos(-1.0);
+        const auto options = tensor_options_t().dtype(torch::kFloat).device(waveform.device());
+
+        // Build the [nf, 1, kernel_width] sinc filterbank.
+        const auto idx = torch::arange(-width, width + of, options).reshape({1, 1, -1}) / of;     // [1,1,K]
+        const auto phase = torch::arange(0, -nf, -1, options).reshape({nf, 1, 1}) / nf;            // [nf,1,1]
+        auto t = (phase + idx) * base_freq;
+        t = t.clamp(-lfw, lfw);
+        const auto window = torch::cos(t * pi / lfw / 2.0).pow(2);
+        t = t * pi;
+        const double scale = base_freq / of;
+        auto kernels = torch::where(t == 0, torch::ones_like(t), torch::sin(t) / t) * window * scale;
+
+        // Apply: pad, strided conv1d, crop to the target length.
+        const auto shape = waveform.sizes().vec();
+        const int64_t length = shape[shape.size() - 1];
+        auto wav = waveform.reshape({-1, length});
+        const int64_t num_wavs = wav.size(0);
+        wav = torch::constant_pad_nd(wav, {width, width + of}, 0);
+        auto resampled = torch::nn::functional::conv1d(wav.unsqueeze(1), kernels,
+                                                       torch::nn::functional::Conv1dFuncOptions().stride(of));
+        resampled = resampled.transpose(1, 2).reshape({num_wavs, -1});
+        const int64_t target_length = static_cast<int64_t>(std::ceil(static_cast<double>(nf) * length / of));
+        resampled = resampled.slice(-1, 0, target_length);
+
+        std::vector<int64_t> out_shape(shape.begin(), shape.end() - 1);
+        out_shape.push_back(resampled.size(-1));
+        return resampled.reshape(out_shape);
     }
 } // namespace torchmedia::audio::functional
 #endif // LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_HPP

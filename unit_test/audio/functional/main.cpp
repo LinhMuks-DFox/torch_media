@@ -180,6 +180,119 @@ static void test_melspectrogram() {
     TM_CHECK_CLOSE(mel.sum().item<double>(), 1548267.875, 1548267.875 * 0.03);   // golden sum, 3% tol
 }
 
+// ---------------- create_dct (Tier 1) ----------------
+static void test_create_dct() {
+    auto d_none = create_dct(4, 8, "");
+    TM_CHECK(d_none.size(0) == 8 && d_none.size(1) == 4);
+    TM_CHECK_CLOSE(d_none.sum().item<double>(), 16.0, 1e-3);
+    TM_CHECK_CLOSE(d_none[0][0].item<double>(), 2.0, 1e-4);
+    TM_CHECK_CLOSE(d_none[3][2].item<double>(), -1.847759, 1e-4);
+    auto d_ortho = create_dct(4, 8, "ortho");
+    TM_CHECK_CLOSE(d_ortho.sum().item<double>(), 2.828427, 1e-4);
+    TM_CHECK_CLOSE(d_ortho[0][0].item<double>(), 0.353553, 1e-4);
+}
+
+// ---------------- mfcc (Tier 1) ----------------
+static void test_mfcc() {
+    auto sig = torch::sin(2.0 * PI * 440.0 * torch::arange(16000, torch::kFloat32) / 16000.0).reshape({1, 16000});
+    mfcc_option opt;
+    opt.sample_rate = 16000;
+    opt.n_mfcc = 13;
+    opt.norm = "ortho";
+    opt.mel.sample_rate = 16000;
+    opt.mel.n_fft = 512;
+    opt.mel.win_length = 512;
+    opt.mel.hop_length = 256;
+    opt.mel.n_mels = 64;
+    opt.mel.f_min = 0.0;
+    opt.mel.f_max = 8000.0;
+    opt.mel.power = 2.0;
+    opt.mel.mel_scale = "htk";
+    opt.mel.norm = "";
+    auto m = mfcc(sig, opt);
+    TM_CHECK(m.size(-2) == 13 && m.size(-1) == 63);          // golden shape (1,13,63)
+    TM_CHECK_CLOSE(m.sum().item<double>(), -15546.43, 50.0); // golden sum (tol for mel/dB impl diffs)
+    TM_CHECK_CLOSE(m[0][0][0].item<double>(), 52.4487, 1.0); // golden [0,0,0]
+
+    // log_mels=true branch
+    mfcc_option lopt = opt;
+    lopt.log_mels = true;
+    auto ml = mfcc(sig, lopt);
+    TM_CHECK(ml.size(-2) == 13 && ml.size(-1) == 63);
+    TM_CHECK_CLOSE(ml.sum().item<double>(), -4499.624, 20.0); // log_mels golden
+    TM_CHECK_CLOSE(ml[0][0][0].item<double>(), 12.0768, 0.5);
+}
+
+// ---------------- griffinlim (Tier 1) ----------------
+static void test_griffinlim() {
+    auto wav = torch::sin(2.0 * PI * 5.0 * torch::arange(2000, torch::kFloat32) / 2000.0).reshape({1, 2000});
+    auto win = torch::hann_window(256);
+    auto spec = spectrogram(wav, spectrogram_option()
+                                         .window(win)
+                                         .n_fft(256)
+                                         .win_length(256)
+                                         .hop_length(64)
+                                         .power(2.0)
+                                         .return_complex(false));
+    griffinlim_option g;
+    g.n_fft = 256;
+    g.hop_length = 64;
+    g.win_length = 256;
+    g.window = win;
+    g.power = 2.0;
+    g.n_iter = 32;
+    g.momentum = 0.99;
+    g.rand_init = false;
+    auto rec = griffinlim(spec, g);
+    TM_CHECK(rec.size(-1) == 1984);                            // golden shape
+    TM_CHECK_CLOSE(rec.sum().item<double>(), 901.7087, 5.0);   // golden sum
+    TM_CHECK_CLOSE(rec[0][1000].item<double>(), -0.03503, 0.02); // golden sample (same ATen ops -> close)
+}
+
+static void test_griffinlim_branches() {
+    auto wav = torch::sin(2.0 * PI * 5.0 * torch::arange(1024, torch::kFloat32) / 1024.0).reshape({1, 1024});
+    auto win = torch::hann_window(256);
+    auto spec = spectrogram(wav, spectrogram_option().window(win).n_fft(256).win_length(256).hop_length(64).power(2.0).return_complex(false));
+
+    // default window (none set -> hann), momentum=0 branch, explicit length>0 branch
+    griffinlim_option g1;
+    g1.n_fft = 256;
+    g1.hop_length = 64;
+    g1.win_length = 256;
+    g1.power = 2.0;
+    g1.n_iter = 4;
+    g1.momentum = 0.0;
+    g1.length = 1024;
+    auto r1 = griffinlim(spec, g1);
+    TM_CHECK(r1.size(-1) == 1024); // explicit length
+
+    // rand_init=true branch (random phase -> just check shape)
+    griffinlim_option g2;
+    g2.n_fft = 256;
+    g2.hop_length = 64;
+    g2.win_length = 256;
+    g2.window = win;
+    g2.power = 2.0;
+    g2.n_iter = 4;
+    g2.rand_init = true;
+    auto r2 = griffinlim(spec, g2);
+    TM_CHECK(r2.dim() == 2 && r2.size(0) == 1);
+}
+
+// ---------------- resample (Tier 1) ----------------
+static void test_resample() {
+    auto x = torch::sin(2.0 * PI * 3.0 * torch::arange(64, torch::kFloat32) / 64.0).reshape({1, 64});
+    auto r1 = resample(x, 64, 32); // downsample 2x
+    TM_CHECK(r1.size(-1) == 32);
+    TM_CHECK_CLOSE(r1.sum().item<double>(), 0.049087, 1e-3);
+    TM_CHECK_CLOSE(r1[0][1].item<double>(), 0.546815, 1e-3);
+    TM_CHECK_CLOSE(r1[0][2].item<double>(), 0.927328, 1e-3);
+    auto r2 = resample(x, 64, 48); // non-integer ratio (gcd reduce 4:3)
+    TM_CHECK(r2.size(-1) == 48);
+    TM_CHECK_CLOSE(r2.sum().item<double>(), 0.020851, 1e-3);
+    TM_CHECK_CLOSE(r2[0][1].item<double>(), 0.378224, 1e-3);
+}
+
 // ---------------- option setters ----------------
 static void test_option_setters() {
     auto so = spectrogram_option()
@@ -219,6 +332,11 @@ int main() {
     test_mel_filter_bank_slaney();
     test_mel_filter_bank_branches();
     test_melspectrogram();
+    test_create_dct();
+    test_mfcc();
+    test_griffinlim();
+    test_griffinlim_branches();
+    test_resample();
     test_option_setters();
     return tm_test::summary("audio_test_functional");
 }

@@ -137,5 +137,31 @@ namespace torchmedia::audio::functional {
 
     typedef struct db_to_amplitude_option {
     } db_to_amplitude_option_t;
+
+    typedef struct mfcc_option {
+        int sample_rate = 16000;
+        int n_mfcc = 40;
+        std::string norm = "ortho"; // DCT normalization ("ortho" or "")
+        bool log_mels = false;      // log(mel + 1e-6) instead of amplitude_to_DB
+        float top_db = 80.0f;
+        mel_spectrogram_option mel{}; // mel spectrogram parameters
+    } mfcc_option_t;
+
+    typedef struct griffinlim_option {
+        int n_fft = 400;
+        int hop_length = 200;
+        int win_length = 400;
+        tensor_t window = {};   // defaults to hann_window(win_length)
+        double power = 2.0;
+        int n_iter = 32;
+        double momentum = 0.99;
+        int length = -1;        // -1 => inferred from the spectrogram
+        bool rand_init = false; // false => deterministic
+    } griffinlim_option_t;
+
+    typedef struct resample_option {
+        int lowpass_filter_width = 6;
+        double rolloff = 0.99; // cutoff = rolloff * Nyquist of the lower rate
+    } resample_option_t;
 } // namespace torchmedia::audio::functional
 #endif // LIB_TORCH_MEDIA_AUDIO_FUNCTIONAL_METHODS_OPTIONS_HPP
