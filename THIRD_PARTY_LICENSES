@@ -8,3 +8,9 @@ dr_wav  (part of dr_libs)
   Vendored:  libtorchmedia/include/torchmedia/_audio/_vendor/dr_wav.h
   License:   public domain (Unlicense) OR MIT-0, at your option.
 ================================================================================
+stb_image / stb_image_write  (part of stb)
+  Upstream:  https://github.com/nothings/stb
+  Author:    Sean Barrett
+  Vendored:  libtorchmedia/include/torchmedia/_vision/_vendor/{stb_image.h, stb_image_write.h}
+  License:   public domain (Unlicense) OR MIT, at your option.
+================================================================================
