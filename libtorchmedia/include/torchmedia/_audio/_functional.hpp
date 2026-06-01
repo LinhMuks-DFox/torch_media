@@ -275,37 +275,11 @@ namespace torchmedia::audio::functional {
     }
 
     inline auto mel_scale(const_tensor_lref_t spec, const_tensor_lref_t fb) -> tensor_t {
-        const auto sizes = spec.sizes();
-        const auto ndim = sizes.size();
-        int64_t freq = sizes[ndim - 2];
-        int64_t time = sizes[ndim - 1];
-
-        int64_t batch = 1;
-        for (int i = 0; i < ndim - 2; i++) {
-            batch *= sizes[i];
-        }
-        // reshape => [batch, freq, time]
-        auto spec_3d = spec.reshape({batch, freq, time});
-        // 转置 => [batch, time, freq]
-        spec_3d = spec_3d.transpose(1, 2);
-
-        // fb => [n_mels, freq], 做 transpose => [freq, n_mels]
-        const auto fb_t = fb.transpose(0, 1); // [freq, n_mels]
-
-        // [batch, time, freq] matmul [freq, n_mels] => [batch, time, n_mels]
-        auto mel_3d = matmul(spec_3d, fb_t);
-
-        // 再转置回 => [batch, n_mels, time]
-        mel_3d = mel_3d.transpose(1, 2);
-
-        // 最后 reshape => [..., n_mels, time]
-        std::vector<int64_t> final_shape;
-        final_shape.push_back(batch);
-        final_shape.push_back(mel_3d.size(1)); // n_mels
-        final_shape.push_back(mel_3d.size(2)); // time
-        auto mel_out = mel_3d.reshape(final_shape);
-
-        return mel_out;
+        // fb is [n_mels, n_freqs]; spec is [..., n_freqs, time]. matmul broadcasts over the leading
+        // dims, projecting to [..., n_mels, time] and PRESERVING the input rank (torchaudio contract).
+        // (An earlier version collapsed all leading dims into a single batch axis, which added a
+        // spurious dimension for 1D/2D input and flattened batch/channel structure for >3D input.)
+        return matmul(fb, spec);
     }
 
     inline auto melspectrogram(const_tensor_lref_t waveform, const mel_spectrogram_option &opt) -> tensor_t {
@@ -422,18 +396,16 @@ namespace torchmedia::audio::functional {
 
     // Band-limited sinc resampling expressed as a strided conv1d (mirrors torchaudio.functional.resample,
     // resampling_method="sinc_interp_hann"). Uses the same ATen ops, so it matches torchaudio point-wise.
-    inline auto resample(const_tensor_lref_t waveform, int orig_freq, int new_freq, const resample_option &opt = {})
-            -> tensor_t {
-        const int gcd = std::gcd(orig_freq, new_freq);
+    // Build the [nf, 1, kernel_width] windowed-sinc resampling filterbank (mirrors torchaudio's
+    // _get_sinc_resample_kernel). Split out from resample() so transforms can cache it (see task21/G1).
+    inline auto _sinc_resample_kernel(int orig_freq, int new_freq, int gcd, const resample_option &opt,
+                                      const tensor_options_t &options) -> std::pair<tensor_t, int> {
         const int of = orig_freq / gcd;
         const int nf = new_freq / gcd;
         const int lfw = opt.lowpass_filter_width;
         const double base_freq = std::min(of, nf) * opt.rolloff;
         const int width = static_cast<int>(std::ceil(lfw * of / base_freq));
         const double pi = std::acos(-1.0);
-        const auto options = tensor_options_t().dtype(torch::kFloat).device(waveform.device());
-
-        // Build the [nf, 1, kernel_width] sinc filterbank.
         const auto idx = torch::arange(-width, width + of, options).reshape({1, 1, -1}) / of; // [1,1,K]
         const auto phase = torch::arange(0, -nf, -1, options).reshape({nf, 1, 1}) / nf; // [nf,1,1]
         auto t = (phase + idx) * base_freq;
@@ -442,8 +414,15 @@ namespace torchmedia::audio::functional {
         t = t * pi;
         const double scale = base_freq / of;
         auto kernels = torch::where(t == 0, torch::ones_like(t), torch::sin(t) / t) * window * scale;
+        return {kernels, width};
+    }
 
-        // Apply: pad, strided conv1d, crop to the target length.
+    // Apply a precomputed sinc kernel: pad, strided conv1d, crop to the target length (mirrors
+    // torchaudio's _apply_sinc_resample_kernel).
+    inline auto _apply_sinc_resample_kernel(const_tensor_lref_t waveform, int orig_freq, int new_freq, int gcd,
+                                            const_tensor_lref_t kernels, int width) -> tensor_t {
+        const int of = orig_freq / gcd;
+        const int nf = new_freq / gcd;
         const auto shape = waveform.sizes().vec();
         const int64_t length = shape[shape.size() - 1];
         auto wav = waveform.reshape({-1, length});
@@ -454,10 +433,17 @@ namespace torchmedia::audio::functional {
         resampled = resampled.transpose(1, 2).reshape({num_wavs, -1});
         const int64_t target_length = static_cast<int64_t>(std::ceil(static_cast<double>(nf) * length / of));
         resampled = resampled.slice(-1, 0, target_length);
-
         std::vector<int64_t> out_shape(shape.begin(), shape.end() - 1);
         out_shape.push_back(resampled.size(-1));
         return resampled.reshape(out_shape);
+    }
+
+    inline auto resample(const_tensor_lref_t waveform, int orig_freq, int new_freq, const resample_option &opt = {})
+            -> tensor_t {
+        const int gcd = std::gcd(orig_freq, new_freq);
+        const auto options = tensor_options_t().dtype(torch::kFloat).device(waveform.device());
+        const auto [kernels, width] = _sinc_resample_kernel(orig_freq, new_freq, gcd, opt, options);
+        return _apply_sinc_resample_kernel(waveform, orig_freq, new_freq, gcd, kernels, width);
     }
 
     // mu-law companding encode (mirrors torchaudio.functional.mu_law_encoding). Returns integer codes 0..mu.

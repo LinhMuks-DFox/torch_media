@@ -3,6 +3,7 @@ dependence/
 
 # build output
 build/
+build-cov/
 cmake-build-*/
 compile_commands.json
 

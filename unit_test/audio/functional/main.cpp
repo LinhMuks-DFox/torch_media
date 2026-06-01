@@ -930,7 +930,75 @@ static void test_vad() {
     TM_CHECK(vad(torch::zeros({1, 8000}), sr).size(-1) == 0);
 }
 
+// ---------------- coverage-gap tests (error/branch paths in _functional.hpp) ----------------
+static bool raises_inv(const std::function<void()> &fnc) {
+    try {
+        fnc();
+    } catch (const std::invalid_argument &) {
+        return true;
+    }
+    return false;
+}
+
+static void test_coverage_gaps() {
+    // mu_law_encoding: integer input -> the is_floating_point() cast branch.
+    TM_CHECK(mu_law_encoding(torch::zeros({4}, torch::kInt32), 256).scalar_type() == torch::kInt64);
+
+    // compute_deltas: the non-default pad modes.
+    auto cd_in = torch::randn({2, 12});
+    TM_CHECK(compute_deltas(cd_in, 5, "constant").sizes() == cd_in.sizes());
+    TM_CHECK(compute_deltas(cd_in, 5, "reflect").sizes() == cd_in.sizes());
+    TM_CHECK(compute_deltas(cd_in, 5, "circular").sizes() == cd_in.sizes());
+
+    // add_noise: the lengths-mask branch.
+    auto wav = torch::randn({2, 10});
+    auto noise = torch::randn({2, 10});
+    auto snr = torch::tensor({10.0f, 10.0f});
+    auto lengths = torch::tensor({8L, 10L});
+    TM_CHECK(add_noise(wav, noise, snr, lengths).sizes() == wav.sizes());
+
+    // frechet_distance: both validation raise paths.
+    auto mu3 = torch::zeros({3});
+    auto s33 = torch::eye(3);
+    TM_CHECK(raises_inv([&] { (void) frechet_distance(mu3, torch::eye(2), mu3, s33); })); // square/size mismatch
+    TM_CHECK(raises_inv(
+            [&] { (void) frechet_distance(mu3, s33, torch::zeros({2}), torch::eye(2)); })); // x/y shape mismatch
+
+    // mask_along_axis: frequency axis (axis == dim-2) -> the maskb.unsqueeze branch.
+    auto spec2d = torch::randn({4, 6});
+    TM_CHECK(mask_along_axis(spec2d, 2, 0.0, /*axis=*/0).sizes() == spec2d.sizes());
+
+    // mask_along_axis_iid: validation + early-return paths.
+    TM_CHECK(raises_inv([] { (void) mask_along_axis_iid(torch::randn({4, 6}), 2, 0.0, 1); })); // dim < 3
+    TM_CHECK(raises_inv([] { (void) mask_along_axis_iid(torch::randn({2, 4, 6}), 2, 0.0, 0); })); // bad axis
+    TM_CHECK(raises_inv([] { (void) mask_along_axis_iid(torch::randn({2, 4, 6}), 2, 0.0, 2, 2.0); })); // p out of range
+    auto iid_in = torch::randn({2, 4, 6});
+    TM_CHECK_TENSOR_CLOSE(mask_along_axis_iid(iid_in, 0, 0.0, 2, 1.0), iid_in, 0.0, 0.0); // mp<1 early return
+
+    // inverse_spectrogram: window-norm branch and the pad-trim branch.
+    auto sig = torch::randn({1, 64});
+    auto win = torch::hann_window(16);
+    auto cspec = spectrogram(
+            sig, spectrogram_option().window(win).n_fft(16).hop_length(8).win_length(16).return_complex(true));
+    TM_CHECK(inverse_spectrogram(cspec, 64, 0, win, 16, 8, 16, "window").size(-1) == 64);
+    auto cspec_p = spectrogram(
+            sig, spectrogram_option().pad(2).window(win).n_fft(16).hop_length(8).win_length(16).return_complex(true));
+    TM_CHECK(inverse_spectrogram(cspec_p, 64, 2, win, 16, 8, 16, "none").size(-1) == 64);
+
+    // sliding_window_cmn: window-clamp branch (few frames, default min_cmn_window=100).
+    TM_CHECK(sliding_window_cmn(torch::randn({5, 4})).sizes() == torch::IntArrayRef({5, 4}));
+    // norm_vars=true, cmn_window>1: the cur_sumsq subtraction as the window slides forward.
+    auto cmn_nv = sliding_window_cmn(torch::randn({10, 4}), /*cmn_window=*/3, /*min_cmn_window=*/2,
+                                     /*center=*/false, /*norm_vars=*/true);
+    TM_CHECK(cmn_nv.sizes() == torch::IntArrayRef({10, 4}));
+    // norm_vars=true, min_cmn_window=1: t=0 has a single-frame window -> the window_frames==1 zero-fill.
+    auto cmn_nv1 = sliding_window_cmn(torch::randn({4, 3}), /*cmn_window=*/2, /*min_cmn_window=*/1,
+                                      /*center=*/false, /*norm_vars=*/true);
+    TM_CHECK(cmn_nv1.sizes() == torch::IntArrayRef({4, 3}));
+}
+
 int main() {
+    test_coverage_gaps();
     test_convolve_full_length();
     test_convolve_modes();
     test_convolve_broadcast_and_errors();
